@@ -381,5 +381,3 @@ def admin_categories(store_id: str, payload: CategoriesPayload, x_admin_token: s
         return {"ok": True, "deleted_keys": deleted_keys, "updated_at": row.updated_at.isoformat()}
     finally:
         db.close()
-
-
