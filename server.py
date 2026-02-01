@@ -1,326 +1,193 @@
-import os
-import json
-import sqlite3
-from datetime import datetime
-from typing import Optional, List, Dict
+# server.py FINAL
 
-from fastapi import FastAPI, Header, HTTPException
+import os, sqlite3, time
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 
-SERVICE = "stock-server"
-VERSION = "4.0"
-
-# ✅ Railway Variables에서 ADMIN_TOKEN 설정 권장 (없으면 기본값 사용)
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "dldydtjq159")
-
-# ✅ Railway 볼륨 Mount path를 /data 로 설정하면 영구 저장됨
-DATA_DIR = os.getenv("DATA_DIR", "/data")
-os.makedirs(DATA_DIR, exist_ok=True)
-DB_PATH = os.path.join(DATA_DIR, "stock.db")
-
-app = FastAPI(title=SERVICE)
+app = FastAPI(title="stock-server-final")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-DEFAULT_STORES = [
-    {"id": "lab", "name": "김경영 요리 연구소"},
-    {"id": "hall", "name": "청년회관"},
-]
+DATA_DIR = "/data"
+DB_PATH = f"{DATA_DIR}/stock.db"
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "dldydtjq159")
 
-DEFAULT_CATEGORIES = [
-    {"label": "닭", "key": "chicken"},
-    {"label": "소스", "key": "sauce"},
-    {"label": "용기", "key": "container"},
-    {"label": "조미료", "key": "seasoning"},
-    {"label": "식용유", "key": "oil"},
-    {"label": "떡", "key": "ricecake"},
-    {"label": "면", "key": "noodle"},
-    {"label": "야채", "key": "veggie"},
-]
-
-DEFAULT_HELP_TEXT = (
-    "▶ 사용방법\n"
-    "1) 매장 선택\n"
-    "2) 카테고리 선택\n"
-    "3) 품목 추가/선택\n"
-    "4) 실재고/가격/구매처/보관방법/원산지 입력 후 저장\n"
-)
-
-def now_iso():
-    return datetime.utcnow().isoformat() + "Z"
-
-def require_admin(x_admin_token: Optional[str]):
-    if not x_admin_token or x_admin_token != ADMIN_TOKEN:
-        raise HTTPException(status_code=401, detail="Unauthorized")
 
 def get_db():
-    con = sqlite3.connect(DB_PATH)
+    os.makedirs(DATA_DIR, exist_ok=True)
+    con = sqlite3.connect(DB_PATH, check_same_thread=False)
     con.row_factory = sqlite3.Row
     return con
 
-def init_db():
-    con = get_db()
-    cur = con.cursor()
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS stores(
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL
-    )
-    """)
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS categories(
-        store_id TEXT NOT NULL,
-        key TEXT NOT NULL,
-        label TEXT NOT NULL,
-        sort INTEGER NOT NULL DEFAULT 0,
-        PRIMARY KEY(store_id, key)
-    )
-    """)
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS helptext(
-        store_id TEXT PRIMARY KEY,
-        text TEXT NOT NULL
-    )
-    """)
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS items(
+def admin_check(token):
+    if token != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+@app.on_event("startup")
+def startup():
+    db = get_db()
+    c = db.cursor()
+
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS stores (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        store_id TEXT NOT NULL,
-        category_key TEXT NOT NULL,
-        name TEXT NOT NULL,
-        real_stock TEXT DEFAULT "",
-        price TEXT DEFAULT "",
-        vendor TEXT DEFAULT "",
-        storage TEXT DEFAULT "",
-        origin TEXT DEFAULT "",
-        updated_at TEXT DEFAULT ""
+        name TEXT UNIQUE
     )
     """)
 
-    # seed stores
-    cur.execute("SELECT COUNT(*) AS c FROM stores")
-    if cur.fetchone()["c"] == 0:
-        for s in DEFAULT_STORES:
-            cur.execute("INSERT INTO stores(id,name) VALUES(?,?)", (s["id"], s["name"]))
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS categories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        store_id INTEGER,
+        name TEXT,
+        position INTEGER
+    )
+    """)
 
-    # seed categories/helptext per store
-    cur.execute("SELECT id FROM stores")
-    store_ids = [r["id"] for r in cur.fetchall()]
-    for sid in store_ids:
-        cur.execute("SELECT COUNT(*) AS c FROM categories WHERE store_id=?", (sid,))
-        if cur.fetchone()["c"] == 0:
-            for i, cat in enumerate(DEFAULT_CATEGORIES):
-                cur.execute(
-                    "INSERT INTO categories(store_id,key,label,sort) VALUES(?,?,?,?)",
-                    (sid, cat["key"], cat["label"], i)
-                )
-        cur.execute("SELECT COUNT(*) AS c FROM helptext WHERE store_id=?", (sid,))
-        if cur.fetchone()["c"] == 0:
-            cur.execute("INSERT INTO helptext(store_id,text) VALUES(?,?)", (sid, DEFAULT_HELP_TEXT))
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        category_id INTEGER,
+        name TEXT,
+        current INTEGER,
+        minimum INTEGER,
+        unit TEXT,
+        price TEXT,
+        vendor TEXT,
+        link TEXT,
+        updated INTEGER
+    )
+    """)
 
-    con.commit()
-    con.close()
+    c.execute("INSERT OR IGNORE INTO stores(name) VALUES (?)", ("김경영 요리 연구소",))
+    c.execute("INSERT OR IGNORE INTO stores(name) VALUES (?)", ("청년회관",))
 
-init_db()
+    db.commit()
+    db.close()
+
 
 @app.get("/")
 def root():
-    return {"ok": True, "service": SERVICE, "version": VERSION}
+    return {"ok": True, "service": "stock-server", "version": "FINAL"}
 
-@app.get("/health")
-def health():
-    return {"ok": True, "service": SERVICE, "version": VERSION}
 
-# -------------------------
-# Stores
-# -------------------------
-@app.get("/api/stores")
-def list_stores():
-    con = get_db()
-    cur = con.cursor()
-    cur.execute("SELECT id,name FROM stores ORDER BY id")
-    rows = [dict(r) for r in cur.fetchall()]
-    con.close()
-    return {"ok": True, "stores": rows}
+@app.get("/stores")
+def stores():
+    db = get_db()
+    rows = db.execute("SELECT * FROM stores ORDER BY id").fetchall()
+    db.close()
+    return [dict(r) for r in rows]
 
-@app.get("/api/stores/{store_id}/meta")
-def store_meta(store_id: str):
-    con = get_db()
-    cur = con.cursor()
 
-    cur.execute("SELECT id,name FROM stores WHERE id=?", (store_id,))
-    s = cur.fetchone()
-    if not s:
-        con.close()
-        raise HTTPException(status_code=404, detail="Store not found")
+@app.get("/categories/{store_id}")
+def categories(store_id: int):
+    db = get_db()
+    rows = db.execute(
+        "SELECT * FROM categories WHERE store_id=? ORDER BY position",
+        (store_id,)
+    ).fetchall()
+    db.close()
+    return [dict(r) for r in rows]
 
-    cur.execute("SELECT key,label,sort FROM categories WHERE store_id=? ORDER BY sort", (store_id,))
-    cats = [{"key": r["key"], "label": r["label"]} for r in cur.fetchall()]
 
-    cur.execute("SELECT text FROM helptext WHERE store_id=?", (store_id,))
-    ht = cur.fetchone()
-    help_text = ht["text"] if ht else DEFAULT_HELP_TEXT
-
-    con.close()
-    return {
-        "ok": True,
-        "store": {"id": s["id"], "name": s["name"]},
-        "categories": cats,
-        "help_text": help_text
-    }
-
-# -------------------------
-# Admin: categories + helptext
-# -------------------------
-@app.put("/api/admin/stores/{store_id}/categories")
-def admin_save_categories(store_id: str, payload: Dict, x_admin_token: Optional[str] = Header(default=None)):
-    require_admin(x_admin_token)
-
-    categories = payload.get("categories")
-    if not isinstance(categories, list) or len(categories) == 0:
-        raise HTTPException(status_code=400, detail="categories required")
-
-    # validate
-    cleaned = []
-    seen = set()
-    for i, c in enumerate(categories):
-        key = (c.get("key") or "").strip()
-        label = (c.get("label") or "").strip()
-        if not key or not label:
-            raise HTTPException(status_code=400, detail="category key/label required")
-        if key in seen:
-            raise HTTPException(status_code=400, detail=f"duplicate key: {key}")
-        seen.add(key)
-        cleaned.append((store_id, key, label, i))
-
-    con = get_db()
-    cur = con.cursor()
-
-    # ensure store exists
-    cur.execute("SELECT id FROM stores WHERE id=?", (store_id,))
-    if not cur.fetchone():
-        con.close()
-        raise HTTPException(status_code=404, detail="Store not found")
-
-    # replace categories
-    cur.execute("DELETE FROM categories WHERE store_id=?", (store_id,))
-    cur.executemany("INSERT INTO categories(store_id,key,label,sort) VALUES(?,?,?,?)", cleaned)
-    con.commit()
-    con.close()
-    return {"ok": True, "updated_at": now_iso()}
-
-@app.put("/api/admin/stores/{store_id}/helptext")
-def admin_save_helptext(store_id: str, payload: Dict, x_admin_token: Optional[str] = Header(default=None)):
-    require_admin(x_admin_token)
-    text = payload.get("text")
-    if not isinstance(text, str):
-        raise HTTPException(status_code=400, detail="text required")
-
-    con = get_db()
-    cur = con.cursor()
-    cur.execute("SELECT id FROM stores WHERE id=?", (store_id,))
-    if not cur.fetchone():
-        con.close()
-        raise HTTPException(status_code=404, detail="Store not found")
-
-    cur.execute("INSERT INTO helptext(store_id,text) VALUES(?,?) ON CONFLICT(store_id) DO UPDATE SET text=excluded.text",
-                (store_id, text))
-    con.commit()
-    con.close()
-    return {"ok": True, "updated_at": now_iso()}
-
-# -------------------------
-# Items (public: 누구나 사용 가능)
-# -------------------------
-@app.get("/api/items/{store_id}/{category_key}")
-def list_items(store_id: str, category_key: str):
-    con = get_db()
-    cur = con.cursor()
-    cur.execute("""
-        SELECT id, name, real_stock, price, vendor, storage, origin, updated_at
-        FROM items
-        WHERE store_id=? AND category_key=?
-        ORDER BY name COLLATE NOCASE
-    """, (store_id, category_key))
-    items = [dict(r) for r in cur.fetchall()]
-    con.close()
-    return {"ok": True, "store_id": store_id, "category": category_key, "items": items}
-
-@app.post("/api/items/{store_id}/{category_key}")
-def add_item(store_id: str, category_key: str, payload: Dict):
-    name = (payload.get("name") or "").strip()
-    if not name:
-        raise HTTPException(status_code=400, detail="name required")
-
-    con = get_db()
-    cur = con.cursor()
-
-    # duplicate check
-    cur.execute("SELECT id FROM items WHERE store_id=? AND category_key=? AND name=?", (store_id, category_key, name))
-    if cur.fetchone():
-        con.close()
-        raise HTTPException(status_code=409, detail="duplicate")
-
-    cur.execute("""
-        INSERT INTO items(store_id, category_key, name, real_stock, price, vendor, storage, origin, updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?)
-    """, (
-        store_id, category_key, name,
-        payload.get("real_stock", "") or "",
-        payload.get("price", "") or "",
-        payload.get("vendor", "") or "",
-        payload.get("storage", "") or "",
-        payload.get("origin", "") or "",
-        now_iso()
-    ))
-    con.commit()
-    item_id = cur.lastrowid
-    con.close()
-    return {"ok": True, "id": item_id, "updated_at": now_iso()}
-
-@app.put("/api/items/{store_id}/{category_key}/{item_id}")
-def update_item(store_id: str, category_key: str, item_id: int, payload: Dict):
-    con = get_db()
-    cur = con.cursor()
-    cur.execute("SELECT id FROM items WHERE id=? AND store_id=? AND category_key=?", (item_id, store_id, category_key))
-    if not cur.fetchone():
-        con.close()
-        raise HTTPException(status_code=404, detail="Not found")
-
-    cur.execute("""
-        UPDATE items
-        SET real_stock=?, price=?, vendor=?, storage=?, origin=?, updated_at=?
-        WHERE id=? AND store_id=? AND category_key=?
-    """, (
-        (payload.get("real_stock") or ""),
-        (payload.get("price") or ""),
-        (payload.get("vendor") or ""),
-        (payload.get("storage") or ""),
-        (payload.get("origin") or ""),
-        now_iso(),
-        item_id, store_id, category_key
-    ))
-    con.commit()
-    con.close()
-    return {"ok": True, "updated_at": now_iso()}
-
-@app.delete("/api/items/{store_id}/{category_key}/{item_id}")
-def delete_item(store_id: str, category_key: str, item_id: int):
-    con = get_db()
-    cur = con.cursor()
-    cur.execute("SELECT id FROM items WHERE id=? AND store_id=? AND category_key=?", (item_id, store_id, category_key))
-    if not cur.fetchone():
-        con.close()
-        raise HTTPException(status_code=404, detail="Not found")
-
-    cur.execute("DELETE FROM items WHERE id=? AND store_id=? AND category_key=?", (item_id, store_id, category_key))
-    con.commit()
-    con.close()
+@app.post("/categories/{store_id}")
+def add_category(store_id: int, data: dict, x_admin_token: str = Header(None)):
+    admin_check(x_admin_token)
+    db = get_db()
+    pos = db.execute(
+        "SELECT COALESCE(MAX(position),0)+1 FROM categories WHERE store_id=?",
+        (store_id,)
+    ).fetchone()[0]
+    db.execute(
+        "INSERT INTO categories(store_id,name,position) VALUES (?,?,?)",
+        (store_id, data["name"], pos)
+    )
+    db.commit()
+    db.close()
     return {"ok": True}
+
+
+@app.delete("/categories/{cat_id}")
+def delete_category(cat_id: int, x_admin_token: str = Header(None)):
+    admin_check(x_admin_token)
+    db = get_db()
+    db.execute("DELETE FROM items WHERE category_id=?", (cat_id,))
+    db.execute("DELETE FROM categories WHERE id=?", (cat_id,))
+    db.commit()
+    db.close()
+    return {"ok": True}
+
+
+@app.get("/items/{category_id}")
+def items(category_id: int):
+    db = get_db()
+    rows = db.execute(
+        "SELECT * FROM items WHERE category_id=? ORDER BY name",
+        (category_id,)
+    ).fetchall()
+    db.close()
+    return [dict(r) for r in rows]
+
+
+@app.post("/items/{category_id}")
+def add_item(category_id: int, data: dict):
+    db = get_db()
+    db.execute("""
+    INSERT INTO items(category_id,name,current,minimum,unit,price,vendor,link,updated)
+    VALUES (?,?,?,?,?,?,?,?,?)
+    """, (
+        category_id,
+        data["name"],
+        data.get("current", 0),
+        data.get("minimum", 0),
+        data.get("unit", ""),
+        data.get("price", ""),
+        data.get("vendor", ""),
+        data.get("link", ""),
+        int(time.time())
+    ))
+    db.commit()
+    db.close()
+    return {"ok": True}
+
+
+@app.put("/items/{item_id}")
+def update_item(item_id: int, data: dict):
+    db = get_db()
+    db.execute("""
+    UPDATE items SET
+        current=?, minimum=?, unit=?, price=?, vendor=?, link=?, updated=?
+    WHERE id=?
+    """, (
+        data["current"],
+        data["minimum"],
+        data["unit"],
+        data["price"],
+        data["vendor"],
+        data["link"],
+        int(time.time()),
+        item_id
+    ))
+    db.commit()
+    db.close()
+    return {"ok": True}
+
+
+@app.get("/shortage/{store_id}")
+def shortage(store_id: int):
+    db = get_db()
+    rows = db.execute("""
+    SELECT c.name category, i.name, i.current, i.minimum, (i.minimum-i.current) need
+    FROM items i
+    JOIN categories c ON i.category_id=c.id
+    WHERE c.store_id=? AND i.current < i.minimum
+    """, (store_id,)).fetchall()
+    db.close()
+    return [dict(r) for r in rows]
