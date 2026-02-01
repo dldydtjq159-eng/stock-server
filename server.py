@@ -1,8 +1,8 @@
 import os
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text
 from sqlalchemy.orm import declarative_base, sessionmaker
@@ -13,7 +13,7 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 DB_URL = os.getenv("DB_URL", "sqlite:////data/stock.db")  # Railway Volume: /data
 
-app = FastAPI(title="Stock Cloud", version="3.3")
+app = FastAPI(title="Stock Cloud", version="3.4")
 
 engine = create_engine(
     DB_URL,
@@ -38,14 +38,14 @@ class StoreHelpText(Base):
     __tablename__ = "store_help_text"
     id = Column(Integer, primary_key=True, autoincrement=True)
     store_id = Column(String, nullable=False)
-    set_no = Column(Integer, default=1)
+    menu_no = Column(Integer, default=1)   # ✅ set_no -> menu_no (DB 컬럼명은 새로 안 만들고, 코드에서만 의미 변경)
     text = Column(Text, default="")
 
 class StoreCategories(Base):
     __tablename__ = "store_categories"
     id = Column(Integer, primary_key=True, autoincrement=True)
     store_id = Column(String, nullable=False)
-    set_no = Column(Integer, default=1)
+    menu_no = Column(Integer, default=1)   # ✅ set_no -> menu_no
     categories_json = Column(Text, default="[]")
 
 class Item(Base):
@@ -53,17 +53,15 @@ class Item(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
 
     store_id = Column(String, nullable=False)
-    set_no = Column(Integer, default=1)
+    menu_no = Column(Integer, default=1)   # ✅ set_no -> menu_no
 
     category_key = Column(String, nullable=False)
     name = Column(String, nullable=False)
 
-    # 숫자 재고(부족목록 계산용)
     stock_num = Column(Integer, default=0)
     min_stock = Column(Integer, default=0)
     unit = Column(String, default="")
 
-    # 메모/상세
     real_stock = Column(String, default="")
     price = Column(String, default="")
     vendor = Column(String, default="")
@@ -71,7 +69,7 @@ class Item(Base):
     origin = Column(String, default="")
     note = Column(String, default="")
 
-    buy_url = Column(String, default="")  # 구매링크
+    buy_url = Column(String, default="")
 
     updated_at = Column(DateTime, default=datetime.utcnow)
 
@@ -123,18 +121,17 @@ DEFAULT_CATEGORIES = [
 
 DEFAULT_HELP = (
     "▶ 카테고리 클릭 → 품목 추가/선택 → 저장\n"
-    "▶ 기준재고(숫자)와 현재고(숫자)를 입력하면 부족목록이 자동 계산됩니다.\n"
+    "▶ 기준재고(숫자) + 현재고(숫자)를 입력하면 부족목록이 자동 계산됩니다.\n"
     "▶ 구매링크를 넣으면 버튼으로 바로 사이트 열 수 있어요.\n"
 )
 
-def norm_set(v: int) -> int:
+def norm_menu(v: int) -> int:
     return 2 if int(v) == 2 else 1
 
 def ensure_defaults():
     import json
     db = SessionLocal()
     try:
-        # store_id 기준 seed (중복 방지)
         for st in DEFAULT_STORES:
             ex = db.query(Store).filter(Store.id == st["id"]).first()
             if not ex:
@@ -142,25 +139,26 @@ def ensure_defaults():
         db.commit()
 
         for st in DEFAULT_STORES:
-            for set_no in (1, 2):
+            for menu_no in (1, 2):
                 c = db.query(StoreCategories).filter(
                     StoreCategories.store_id == st["id"],
-                    StoreCategories.set_no == set_no
+                    StoreCategories.menu_no == menu_no
                 ).first()
                 if not c:
                     db.add(StoreCategories(
                         store_id=st["id"],
-                        set_no=set_no,
+                        menu_no=menu_no,
                         categories_json=json.dumps(DEFAULT_CATEGORIES, ensure_ascii=False)
                     ))
+
                 h = db.query(StoreHelpText).filter(
                     StoreHelpText.store_id == st["id"],
-                    StoreHelpText.set_no == set_no
+                    StoreHelpText.menu_no == menu_no
                 ).first()
                 if not h:
                     db.add(StoreHelpText(
                         store_id=st["id"],
-                        set_no=set_no,
+                        menu_no=menu_no,
                         text=DEFAULT_HELP
                     ))
         db.commit()
@@ -213,7 +211,7 @@ def item_to_dict(it: Item) -> Dict[str, Any]:
     return {
         "id": it.id,
         "store_id": it.store_id,
-        "set_no": it.set_no,
+        "menu": it.menu_no,
         "category_key": it.category_key,
         "name": it.name,
         "stock_num": int(it.stock_num or 0),
@@ -237,33 +235,31 @@ def shortage_row(it: Item) -> Dict[str, Any]:
     d["need_qty"] = need
     return d
 
+def get_menu_from_query(menu: Optional[int], set_: Optional[int]) -> int:
+    # ✅ menu가 있으면 menu 우선, 없으면 set 호환
+    if menu is not None:
+        return norm_menu(menu)
+    if set_ is not None:
+        return norm_menu(set_)
+    return 1
+
 # =========================================================
 # Routes
 # =========================================================
 @app.get("/")
 def root():
-    return {"ok": True, "service": "stock-server", "version": "3.3"}
+    return {"ok": True, "service": "stock-server", "version": "3.4"}
 
 @app.get("/api/stores")
 def list_stores():
-    """
-    이름 기준으로 중복 제거해서 반환(화면 중복 방지)
-    """
     db = SessionLocal()
     try:
         stores = db.query(Store).all()
         by_name: Dict[str, Store] = {}
         for s in stores:
             nm = (s.name or "").strip()
-            if not nm:
-                continue
-            if nm not in by_name:
+            if nm and nm not in by_name:
                 by_name[nm] = s
-            else:
-                # 같은 이름이면 id가 작은 것을 유지(안정)
-                if str(s.id) < str(by_name[nm].id):
-                    by_name[nm] = s
-
         uniq = list(by_name.values())
         uniq.sort(key=lambda x: (x.name or "").strip())
         return {"stores": [{"id": s.id, "name": s.name} for s in uniq]}
@@ -271,8 +267,8 @@ def list_stores():
         db.close()
 
 @app.get("/api/stores/{store_id}/meta")
-def store_meta(store_id: str, set: int = Query(1)):
-    set_no = norm_set(set)
+def store_meta(store_id: str, menu: Optional[int] = Query(None), set: Optional[int] = Query(None)):
+    menu_no = get_menu_from_query(menu, set)
     db = SessionLocal()
     try:
         st = db.query(Store).filter(Store.id == store_id).first()
@@ -281,11 +277,11 @@ def store_meta(store_id: str, set: int = Query(1)):
 
         c = db.query(StoreCategories).filter(
             StoreCategories.store_id == store_id,
-            StoreCategories.set_no == set_no
+            StoreCategories.menu_no == menu_no
         ).first()
         h = db.query(StoreHelpText).filter(
             StoreHelpText.store_id == store_id,
-            StoreHelpText.set_no == set_no
+            StoreHelpText.menu_no == menu_no
         ).first()
 
         import json
@@ -294,7 +290,7 @@ def store_meta(store_id: str, set: int = Query(1)):
 
         return {
             "store": {"id": st.id, "name": st.name},
-            "set": set_no,
+            "menu": menu_no,
             "categories": cats,
             "help_text": help_text
         }
@@ -302,58 +298,44 @@ def store_meta(store_id: str, set: int = Query(1)):
         db.close()
 
 @app.get("/api/items/{store_id}/{category_key}")
-def list_items(store_id: str, category_key: str, set: int = Query(1)):
-    set_no = norm_set(set)
+def list_items(store_id: str, category_key: str, menu: Optional[int] = Query(None), set: Optional[int] = Query(None)):
+    menu_no = get_menu_from_query(menu, set)
     db = SessionLocal()
     try:
         q = db.query(Item).filter(
             Item.store_id == store_id,
-            Item.set_no == set_no,
+            Item.menu_no == menu_no,
             Item.category_key == category_key
         ).order_by(Item.name.asc())
         return {"items": [item_to_dict(x) for x in q.all()]}
     finally:
         db.close()
 
-@app.get("/api/items/{store_id}/all")
-def list_items_all(store_id: str, set: int = Query(1)):
-    set_no = norm_set(set)
-    db = SessionLocal()
-    try:
-        q = db.query(Item).filter(Item.store_id == store_id, Item.set_no == set_no)
-        return {"items": [item_to_dict(x) for x in q.all()]}
-    finally:
-        db.close()
-
 @app.get("/api/shortage/{store_id}")
-def list_shortage(store_id: str, set: int = Query(1)):
-    """
-    ✅ 부족목록을 서버에서 계산해서 반환(프로그램이 흔들리지 않게)
-    """
-    set_no = norm_set(set)
+def list_shortage(store_id: str, menu: Optional[int] = Query(None), set: Optional[int] = Query(None)):
+    menu_no = get_menu_from_query(menu, set)
     db = SessionLocal()
     try:
-        q = db.query(Item).filter(Item.store_id == store_id, Item.set_no == set_no)
+        q = db.query(Item).filter(Item.store_id == store_id, Item.menu_no == menu_no)
         rows = []
         for it in q.all():
             mn = int(it.min_stock or 0)
             stock = int(it.stock_num or 0)
             if mn > 0 and stock < mn:
                 rows.append(shortage_row(it))
-        # need_qty 큰 것부터
         rows.sort(key=lambda x: (-int(x.get("need_qty", 0)), (x.get("category_key",""), x.get("name",""))))
         return {"items": rows}
     finally:
         db.close()
 
 @app.post("/api/items/{store_id}/{category_key}")
-def add_item(store_id: str, category_key: str, payload: ItemCreate, set: int = Query(1)):
-    set_no = norm_set(set)
+def add_item(store_id: str, category_key: str, payload: ItemCreate, menu: Optional[int] = Query(None), set: Optional[int] = Query(None)):
+    menu_no = get_menu_from_query(menu, set)
     db = SessionLocal()
     try:
         exists = db.query(Item).filter(
             Item.store_id == store_id,
-            Item.set_no == set_no,
+            Item.menu_no == menu_no,
             Item.category_key == category_key,
             Item.name == payload.name
         ).first()
@@ -362,7 +344,7 @@ def add_item(store_id: str, category_key: str, payload: ItemCreate, set: int = Q
 
         it = Item(
             store_id=store_id,
-            set_no=set_no,
+            menu_no=menu_no,
             category_key=category_key,
             name=payload.name.strip(),
             stock_num=int(payload.stock_num or 0),
@@ -385,14 +367,14 @@ def add_item(store_id: str, category_key: str, payload: ItemCreate, set: int = Q
         db.close()
 
 @app.put("/api/items/{store_id}/{category_key}/{item_id}")
-def update_item(store_id: str, category_key: str, item_id: int, payload: ItemUpdate, set: int = Query(1)):
-    set_no = norm_set(set)
+def update_item(store_id: str, category_key: str, item_id: int, payload: ItemUpdate, menu: Optional[int] = Query(None), set: Optional[int] = Query(None)):
+    menu_no = get_menu_from_query(menu, set)
     db = SessionLocal()
     try:
         it = db.query(Item).filter(
             Item.id == item_id,
             Item.store_id == store_id,
-            Item.set_no == set_no,
+            Item.menu_no == menu_no,
             Item.category_key == category_key
         ).first()
         if not it:
@@ -418,14 +400,14 @@ def update_item(store_id: str, category_key: str, item_id: int, payload: ItemUpd
         db.close()
 
 @app.delete("/api/items/{store_id}/{category_key}/{item_id}")
-def delete_item(store_id: str, category_key: str, item_id: int, set: int = Query(1)):
-    set_no = norm_set(set)
+def delete_item(store_id: str, category_key: str, item_id: int, menu: Optional[int] = Query(None), set: Optional[int] = Query(None)):
+    menu_no = get_menu_from_query(menu, set)
     db = SessionLocal()
     try:
         it = db.query(Item).filter(
             Item.id == item_id,
             Item.store_id == store_id,
-            Item.set_no == set_no,
+            Item.menu_no == menu_no,
             Item.category_key == category_key
         ).first()
         if not it:
@@ -438,14 +420,20 @@ def delete_item(store_id: str, category_key: str, item_id: int, set: int = Query
 
 # ------------------ Admin: helptext/categories ------------------
 @app.put("/api/admin/stores/{store_id}/helptext")
-def admin_helptext(store_id: str, payload: HelpTextPayload, set: int = Query(1), x_admin_token: str = Header(default="")):
+def admin_helptext(
+    store_id: str,
+    payload: HelpTextPayload,
+    menu: Optional[int] = Query(None),
+    set: Optional[int] = Query(None),
+    x_admin_token: str = Header(default="")
+):
     require_admin_token(x_admin_token)
-    set_no = norm_set(set)
+    menu_no = get_menu_from_query(menu, set)
     db = SessionLocal()
     try:
-        row = db.query(StoreHelpText).filter(StoreHelpText.store_id == store_id, StoreHelpText.set_no == set_no).first()
+        row = db.query(StoreHelpText).filter(StoreHelpText.store_id == store_id, StoreHelpText.menu_no == menu_no).first()
         if not row:
-            row = StoreHelpText(store_id=store_id, set_no=set_no, text=payload.text or "")
+            row = StoreHelpText(store_id=store_id, menu_no=menu_no, text=payload.text or "")
             db.add(row)
         else:
             row.text = payload.text or ""
@@ -455,22 +443,28 @@ def admin_helptext(store_id: str, payload: HelpTextPayload, set: int = Query(1),
         db.close()
 
 @app.put("/api/admin/stores/{store_id}/categories")
-def admin_categories(store_id: str, payload: CategoriesPayload, set: int = Query(1), x_admin_token: str = Header(default="")):
+def admin_categories(
+    store_id: str,
+    payload: CategoriesPayload,
+    menu: Optional[int] = Query(None),
+    set: Optional[int] = Query(None),
+    x_admin_token: str = Header(default="")
+):
     require_admin_token(x_admin_token)
-    set_no = norm_set(set)
+    menu_no = get_menu_from_query(menu, set)
     db = SessionLocal()
     try:
         import json
-        row = db.query(StoreCategories).filter(StoreCategories.store_id == store_id, StoreCategories.set_no == set_no).first()
+        row = db.query(StoreCategories).filter(StoreCategories.store_id == store_id, StoreCategories.menu_no == menu_no).first()
         if not row:
-            row = StoreCategories(store_id=store_id, set_no=set_no, categories_json="[]")
+            row = StoreCategories(store_id=store_id, menu_no=menu_no, categories_json="[]")
             db.add(row)
 
         deleted_keys = payload.deleted_keys or []
         if deleted_keys:
             db.query(Item).filter(
                 Item.store_id == store_id,
-                Item.set_no == set_no,
+                Item.menu_no == menu_no,
                 Item.category_key.in_(deleted_keys)
             ).delete(synchronize_session=False)
 
@@ -479,3 +473,5 @@ def admin_categories(store_id: str, payload: CategoriesPayload, set: int = Query
         return {"ok": True}
     finally:
         db.close()
+
+
