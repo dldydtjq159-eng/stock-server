@@ -1,19 +1,21 @@
 import os
-import json
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 from fastapi import FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import (
-    create_engine, Column, Integer, String, DateTime, Text, UniqueConstraint
+    create_engine, Column, Integer, String, DateTime, Text, Boolean
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
 
+# -------------------------------------------------
+# Config
+# -------------------------------------------------
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
-DB_URL = os.getenv("DB_URL", "sqlite:////data/stock.db")
+DB_URL = os.getenv("DB_URL", "sqlite:////data/stock.db")  # Railway Volume: /data
 
-app = FastAPI(title="Stock Cloud", version="3.5")
+app = FastAPI(title="Stock Cloud", version="3.1")
 
 engine = create_engine(
     DB_URL,
@@ -22,86 +24,95 @@ engine = create_engine(
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
 
-def require_token(x_admin_token: str):
+def require_admin_token(x_admin_token: str):
     if not ADMIN_TOKEN or x_admin_token != ADMIN_TOKEN:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-class StoreMeta(Base):
-    __tablename__ = "store_meta"
+# -------------------------------------------------
+# DB Models
+# -------------------------------------------------
+class Store(Base):
+    __tablename__ = "stores"
+    id = Column(String, primary_key=True)  # "kky" 같은 문자열
+    name = Column(String, nullable=False)
+
+class StoreHelpText(Base):
+    __tablename__ = "store_help_text"
     id = Column(Integer, primary_key=True, autoincrement=True)
-    store_id = Column(String, unique=True, index=True)
-    store_name = Column(String, default="")
-    categories1_json = Column(Text, default="[]")
-    categories2_json = Column(Text, default="[]")
-    help_text1 = Column(Text, default="")
-    help_text2 = Column(Text, default="")
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    store_id = Column(String, nullable=False)
+    set_no = Column(Integer, default=1)
+    text = Column(Text, default="")
+
+class StoreCategories(Base):
+    __tablename__ = "store_categories"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    store_id = Column(String, nullable=False)
+    set_no = Column(Integer, default=1)
+    categories_json = Column(Text, default="[]")  # [{"key":"chicken","label":"닭"}, ...]
 
 class Item(Base):
     __tablename__ = "items"
     id = Column(Integer, primary_key=True, autoincrement=True)
-    store_id = Column(String, index=True)
-    category_key = Column(String, index=True)
-    name = Column(String, index=True)
+    store_id = Column(String, nullable=False)
+    set_no = Column(Integer, default=1)
 
-    real_stock = Column(String, default="")
-    price = Column(String, default="")
-    vendor = Column(String, default="")
-    storage = Column(String, default="")
-    origin = Column(String, default="")
-    note = Column(Text, default="")
+    category_key = Column(String, nullable=False)
+    name = Column(String, nullable=False)
 
     stock_num = Column(Integer, default=0)
     min_stock = Column(Integer, default=0)
     unit = Column(String, default="")
 
+    real_stock = Column(String, default="")  # 메모/실재고 텍스트
+    price = Column(String, default="")
+    vendor = Column(String, default="")
+    storage = Column(String, default="")
+    origin = Column(String, default="")
+    note = Column(String, default="")
+
+    buy_url = Column(String, default="")  # ✅ 구매링크
+
     updated_at = Column(DateTime, default=datetime.utcnow)
 
-    __table_args__ = (
-        UniqueConstraint("store_id", "category_key", "name", name="uq_store_cat_name"),
-    )
-
+# -------------------------------------------------
+# Create tables
+# -------------------------------------------------
 Base.metadata.create_all(bind=engine)
 
-def ensure_columns():
+# -------------------------------------------------
+# SQLite 컬럼 자동 추가(기존 DB 유지용)
+# -------------------------------------------------
+def sqlite_has_column(table: str, column: str) -> bool:
+    if not DB_URL.startswith("sqlite"):
+        return True
+    with engine.connect() as conn:
+        rows = conn.exec_driver_sql(f"PRAGMA table_info({table});").fetchall()
+        cols = [r[1] for r in rows]  # (cid, name, type, notnull, dflt_value, pk)
+        return column in cols
+
+def sqlite_add_column(table: str, ddl: str):
     if not DB_URL.startswith("sqlite"):
         return
     with engine.connect() as conn:
-        cols = conn.exec_driver_sql("PRAGMA table_info(items)").fetchall()
-        names = {c[1] for c in cols}
+        conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {ddl};")
 
-        def add_col(sql):
-            conn.exec_driver_sql(sql)
+# buy_url 컬럼이 기존 DB에 없으면 추가
+try:
+    if not sqlite_has_column("items", "buy_url"):
+        sqlite_add_column("items", "buy_url TEXT DEFAULT ''")
+except Exception:
+    # ALTER TABLE 실패해도 서버는 떠야 하니 무시
+    pass
 
-        if "note" not in names:
-            add_col("ALTER TABLE items ADD COLUMN note TEXT DEFAULT ''")
-        if "stock_num" not in names:
-            add_col("ALTER TABLE items ADD COLUMN stock_num INTEGER DEFAULT 0")
-        if "min_stock" not in names:
-            add_col("ALTER TABLE items ADD COLUMN min_stock INTEGER DEFAULT 0")
-        if "unit" not in names:
-            add_col("ALTER TABLE items ADD COLUMN unit VARCHAR DEFAULT ''")
-
-        cols2 = conn.exec_driver_sql("PRAGMA table_info(store_meta)").fetchall()
-        names2 = {c[1] for c in cols2}
-
-        if "categories1_json" not in names2:
-            add_col("ALTER TABLE store_meta ADD COLUMN categories1_json TEXT DEFAULT '[]'")
-        if "categories2_json" not in names2:
-            add_col("ALTER TABLE store_meta ADD COLUMN categories2_json TEXT DEFAULT '[]'")
-        if "help_text1" not in names2:
-            add_col("ALTER TABLE store_meta ADD COLUMN help_text1 TEXT DEFAULT ''")
-        if "help_text2" not in names2:
-            add_col("ALTER TABLE store_meta ADD COLUMN help_text2 TEXT DEFAULT ''")
-
-ensure_columns()
-
+# -------------------------------------------------
+# Default seed (처음 사용자 편하게)
+# -------------------------------------------------
 DEFAULT_STORES = [
-    {"id": "kitchenlab", "name": "김경영 요리 연구소"},
-    {"id": "youthhall", "name": "청년회관"},
+    {"id": "kky", "name": "김경영 요리 연구소"},
+    {"id": "yhc", "name": "청년회관"},
 ]
 
-DEFAULT_CATEGORIES_SET1 = [
+DEFAULT_CATEGORIES = [
     {"key": "chicken", "label": "닭"},
     {"key": "sauce", "label": "소스"},
     {"key": "container", "label": "용기"},
@@ -112,321 +123,315 @@ DEFAULT_CATEGORIES_SET1 = [
     {"key": "veggie", "label": "야채"},
 ]
 
-DEFAULT_CATEGORIES_SET2 = [
-    {"key": "chicken2", "label": "닭(2)"},
-    {"key": "sauce2", "label": "소스(2)"},
-    {"key": "container2", "label": "용기(2)"},
-    {"key": "seasoning2", "label": "조미료(2)"},
-    {"key": "oil2", "label": "식용유(2)"},
-    {"key": "ricecake2", "label": "떡(2)"},
-    {"key": "noodle2", "label": "면(2)"},
-    {"key": "veggie2", "label": "야채(2)"},
-]
-
-DEFAULT_HELP_1 = (
-    "사용방법\n"
-    "1) 매장 선택\n"
-    "2) 카테고리 선택\n"
-    "3) 품목 추가\n"
-    "4) 현재고(숫자) + 기준재고(숫자) 설정\n"
-    "5) 현재고 < 기준재고면 ‘부족목록’에 필요수량이 뜹니다.\n"
-)
-DEFAULT_HELP_2 = "세트2도 동일하게 카테고리를 따로 관리합니다."
-
-def ensure_store_meta():
+def ensure_defaults():
     db = SessionLocal()
     try:
-        for s in DEFAULT_STORES:
-            row = db.query(StoreMeta).filter(StoreMeta.store_id == s["id"]).first()
-            if not row:
-                row = StoreMeta(
-                    store_id=s["id"],
-                    store_name=s["name"],
-                    categories1_json=json.dumps(DEFAULT_CATEGORIES_SET1, ensure_ascii=False),
-                    categories2_json=json.dumps(DEFAULT_CATEGORIES_SET2, ensure_ascii=False),
-                    help_text1=DEFAULT_HELP_1,
-                    help_text2=DEFAULT_HELP_2,
-                    updated_at=datetime.utcnow()
-                )
-                db.add(row)
-            else:
-                if not (row.categories1_json or "").strip():
-                    row.categories1_json = json.dumps(DEFAULT_CATEGORIES_SET1, ensure_ascii=False)
-                if not (row.categories2_json or "").strip():
-                    row.categories2_json = json.dumps(DEFAULT_CATEGORIES_SET2, ensure_ascii=False)
-                if not (row.help_text1 or "").strip():
-                    row.help_text1 = DEFAULT_HELP_1
-                if not (row.help_text2 or "").strip():
-                    row.help_text2 = DEFAULT_HELP_2
+        # stores
+        for st in DEFAULT_STORES:
+            ex = db.query(Store).filter(Store.id == st["id"]).first()
+            if not ex:
+                db.add(Store(id=st["id"], name=st["name"]))
+        db.commit()
+
+        # categories & helptext for each store and set 1/2
+        for st in DEFAULT_STORES:
+            for set_no in (1, 2):
+                c = db.query(StoreCategories).filter(
+                    StoreCategories.store_id == st["id"],
+                    StoreCategories.set_no == set_no
+                ).first()
+                if not c:
+                    import json
+                    db.add(StoreCategories(
+                        store_id=st["id"],
+                        set_no=set_no,
+                        categories_json=json.dumps(DEFAULT_CATEGORIES, ensure_ascii=False)
+                    ))
+                h = db.query(StoreHelpText).filter(
+                    StoreHelpText.store_id == st["id"],
+                    StoreHelpText.set_no == set_no
+                ).first()
+                if not h:
+                    db.add(StoreHelpText(
+                        store_id=st["id"],
+                        set_no=set_no,
+                        text="▶ 카테고리 클릭 → 품목(종류) 추가/선택 → 저장\n▶ 기준재고 미만이면 부족목록에 자동 표시됩니다."
+                    ))
         db.commit()
     finally:
         db.close()
 
-ensure_store_meta()
+ensure_defaults()
 
-def pick_set(set_no: int) -> int:
-    return 2 if int(set_no) == 2 else 1
-
-class Category(BaseModel):
-    key: str
-    label: str
-
-class CategoriesPayload(BaseModel):
-    categories: List[Category]
-    deleted_keys: Optional[List[str]] = None
-
-class HelpTextPayload(BaseModel):
-    text: str
-
+# -------------------------------------------------
+# Schemas
+# -------------------------------------------------
 class ItemCreate(BaseModel):
     name: str
+    stock_num: int = 0
+    min_stock: int = 0
+    unit: str = ""
     real_stock: str = ""
     price: str = ""
     vendor: str = ""
     storage: str = ""
     origin: str = ""
     note: str = ""
-    stock_num: int = 0
-    min_stock: int = 0
-    unit: str = ""
+    buy_url: str = ""  # ✅
 
 class ItemUpdate(BaseModel):
+    stock_num: int = 0
+    min_stock: int = 0
+    unit: str = ""
     real_stock: str = ""
     price: str = ""
     vendor: str = ""
     storage: str = ""
     origin: str = ""
     note: str = ""
-    stock_num: int = 0
-    min_stock: int = 0
-    unit: str = ""
+    buy_url: str = ""  # ✅
 
-def item_to_dict(r: Item):
+class HelpTextPayload(BaseModel):
+    text: str = ""
+
+class CategoriesPayload(BaseModel):
+    categories: List[Dict[str, str]] = []
+    deleted_keys: List[str] = []
+
+# -------------------------------------------------
+# Utils
+# -------------------------------------------------
+def item_to_dict(it: Item) -> Dict[str, Any]:
     return {
-        "id": r.id,
-        "store_id": r.store_id,
-        "category_key": r.category_key,
-        "name": r.name,
-        "real_stock": r.real_stock,
-        "price": r.price,
-        "vendor": r.vendor,
-        "storage": r.storage,
-        "origin": r.origin,
-        "note": r.note or "",
-        "stock_num": int(r.stock_num or 0),
-        "min_stock": int(r.min_stock or 0),
-        "unit": r.unit or "",
-        "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+        "id": it.id,
+        "store_id": it.store_id,
+        "set_no": it.set_no,
+        "category_key": it.category_key,
+        "name": it.name,
+        "stock_num": it.stock_num,
+        "min_stock": it.min_stock,
+        "unit": it.unit,
+        "real_stock": it.real_stock,
+        "price": it.price,
+        "vendor": it.vendor,
+        "storage": it.storage,
+        "origin": it.origin,
+        "note": it.note,
+        "buy_url": it.buy_url,  # ✅
+        "updated_at": it.updated_at.isoformat() if it.updated_at else None
     }
 
-@app.get("/health")
-def health():
-    return {"ok": True, "service": "stock-server", "version": "3.5"}
+# -------------------------------------------------
+# Routes
+# -------------------------------------------------
+@app.get("/")
+def root():
+    return {"ok": True, "service": "stock-server", "version": "3.1"}
 
 @app.get("/api/stores")
-def stores():
-    return {"stores": DEFAULT_STORES}
-
-@app.get("/api/stores/{store_id}/meta")
-def store_meta(store_id: str, set: int = Query(default=1)):
-    set_no = pick_set(set)
+def list_stores():
     db = SessionLocal()
     try:
-        row = db.query(StoreMeta).filter(StoreMeta.store_id == store_id).first()
-        if not row:
-            raise HTTPException(status_code=404, detail="store not found")
+        stores = db.query(Store).order_by(Store.name.asc()).all()
+        return {"stores": [{"id": s.id, "name": s.name} for s in stores]}
+    finally:
+        db.close()
 
-        if set_no == 1:
-            cats_json = row.categories1_json or "[]"
-            help_text = row.help_text1 or ""
-        else:
-            cats_json = row.categories2_json or "[]"
-            help_text = row.help_text2 or ""
+@app.get("/api/stores/{store_id}/meta")
+def store_meta(store_id: str, set: int = Query(1)):
+    set_no = 2 if int(set) == 2 else 1
+    db = SessionLocal()
+    try:
+        st = db.query(Store).filter(Store.id == store_id).first()
+        if not st:
+            raise HTTPException(404, "store not found")
 
-        try:
-            categories = json.loads(cats_json)
-        except Exception:
-            categories = []
+        c = db.query(StoreCategories).filter(
+            StoreCategories.store_id == store_id,
+            StoreCategories.set_no == set_no
+        ).first()
+        h = db.query(StoreHelpText).filter(
+            StoreHelpText.store_id == store_id,
+            StoreHelpText.set_no == set_no
+        ).first()
+
+        import json
+        cats = json.loads(c.categories_json) if c and c.categories_json else []
+        help_text = h.text if h else ""
 
         return {
-            "store": {"id": row.store_id, "name": row.store_name},
+            "store": {"id": st.id, "name": st.name},
             "set": set_no,
-            "categories": categories,
-            "help_text": help_text,
-            "updated_at": row.updated_at.isoformat() if row.updated_at else None
+            "categories": cats,
+            "help_text": help_text
         }
     finally:
         db.close()
 
-@app.get("/api/items/{store_id}/{cat_key}")
-def list_items(store_id: str, cat_key: str):
+# Items list by category
+@app.get("/api/items/{store_id}/{category_key}")
+def list_items(store_id: str, category_key: str, set: int = Query(1)):
+    set_no = 2 if int(set) == 2 else 1
     db = SessionLocal()
     try:
-        rows = (
-            db.query(Item)
-            .filter(Item.store_id == store_id, Item.category_key == cat_key)
-            .order_by(Item.name.asc())
-            .all()
-        )
-        return {"items": [item_to_dict(r) for r in rows]}
+        q = db.query(Item).filter(
+            Item.store_id == store_id,
+            Item.set_no == set_no,
+            Item.category_key == category_key
+        ).order_by(Item.name.asc())
+        items = [item_to_dict(x) for x in q.all()]
+        return {"items": items}
     finally:
         db.close()
 
+# All items
 @app.get("/api/items/{store_id}/all")
-def list_all_items(store_id: str):
+def list_items_all(store_id: str, set: int = Query(1)):
+    set_no = 2 if int(set) == 2 else 1
     db = SessionLocal()
     try:
-        rows = (
-            db.query(Item)
-            .filter(Item.store_id == store_id)
-            .order_by(Item.category_key.asc(), Item.name.asc())
-            .all()
-        )
-        return {"items": [item_to_dict(r) for r in rows]}
+        q = db.query(Item).filter(Item.store_id == store_id, Item.set_no == set_no)
+        items = [item_to_dict(x) for x in q.all()]
+        return {"items": items}
     finally:
         db.close()
 
-@app.post("/api/items/{store_id}/{cat_key}")
-def add_item(store_id: str, cat_key: str, payload: ItemCreate):
+# Add item
+@app.post("/api/items/{store_id}/{category_key}")
+def add_item(store_id: str, category_key: str, payload: ItemCreate, set: int = Query(1)):
+    set_no = 2 if int(set) == 2 else 1
     db = SessionLocal()
     try:
-        name = (payload.name or "").strip()
-        if not name:
-            raise HTTPException(status_code=400, detail="name required")
+        # unique by (store, set, category, name)
+        exists = db.query(Item).filter(
+            Item.store_id == store_id,
+            Item.set_no == set_no,
+            Item.category_key == category_key,
+            Item.name == payload.name
+        ).first()
+        if exists:
+            raise HTTPException(status_code=409, detail="duplicate name")
 
-        row = Item(
+        it = Item(
             store_id=store_id,
-            category_key=cat_key,
-            name=name,
+            set_no=set_no,
+            category_key=category_key,
+            name=payload.name.strip(),
+            stock_num=payload.stock_num,
+            min_stock=payload.min_stock,
+            unit=payload.unit,
             real_stock=payload.real_stock,
             price=payload.price,
             vendor=payload.vendor,
             storage=payload.storage,
             origin=payload.origin,
             note=payload.note,
-            stock_num=int(payload.stock_num or 0),
-            min_stock=int(payload.min_stock or 0),
-            unit=payload.unit or "",
+            buy_url=payload.buy_url,  # ✅
             updated_at=datetime.utcnow()
         )
-        db.add(row)
-        try:
-            db.commit()
-        except Exception:
-            db.rollback()
-            raise HTTPException(status_code=409, detail="duplicate name")
-
-        db.refresh(row)
-        return {"ok": True, "id": row.id, "updated_at": row.updated_at.isoformat()}
+        db.add(it)
+        db.commit()
+        db.refresh(it)
+        return {"ok": True, "id": it.id}
     finally:
         db.close()
 
-@app.put("/api/items/{store_id}/{cat_key}/{item_id}")
-def update_item(store_id: str, cat_key: str, item_id: int, payload: ItemUpdate):
+# Update item
+@app.put("/api/items/{store_id}/{category_key}/{item_id}")
+def update_item(store_id: str, category_key: str, item_id: int, payload: ItemUpdate, set: int = Query(1)):
+    set_no = 2 if int(set) == 2 else 1
     db = SessionLocal()
     try:
-        row = (
-            db.query(Item)
-            .filter(Item.id == item_id, Item.store_id == store_id, Item.category_key == cat_key)
-            .first()
-        )
-        if not row:
-            raise HTTPException(status_code=404, detail="item not found")
+        it = db.query(Item).filter(
+            Item.id == item_id,
+            Item.store_id == store_id,
+            Item.set_no == set_no,
+            Item.category_key == category_key
+        ).first()
+        if not it:
+            raise HTTPException(404, "item not found")
 
-        row.real_stock = payload.real_stock
-        row.price = payload.price
-        row.vendor = payload.vendor
-        row.storage = payload.storage
-        row.origin = payload.origin
-        row.note = payload.note
-        row.stock_num = int(payload.stock_num or 0)
-        row.min_stock = int(payload.min_stock or 0)
-        row.unit = payload.unit or ""
-        row.updated_at = datetime.utcnow()
+        it.stock_num = payload.stock_num
+        it.min_stock = payload.min_stock
+        it.unit = payload.unit
+        it.real_stock = payload.real_stock
+        it.price = payload.price
+        it.vendor = payload.vendor
+        it.storage = payload.storage
+        it.origin = payload.origin
+        it.note = payload.note
+        it.buy_url = payload.buy_url  # ✅
+        it.updated_at = datetime.utcnow()
 
         db.commit()
-        db.refresh(row)
-        return {"ok": True, "updated_at": row.updated_at.isoformat()}
+        db.refresh(it)
+        return {"ok": True, "updated_at": it.updated_at.isoformat()}
     finally:
         db.close()
 
-@app.delete("/api/items/{store_id}/{cat_key}/{item_id}")
-def delete_item(store_id: str, cat_key: str, item_id: int):
+# Delete item
+@app.delete("/api/items/{store_id}/{category_key}/{item_id}")
+def delete_item(store_id: str, category_key: str, item_id: int, set: int = Query(1)):
+    set_no = 2 if int(set) == 2 else 1
     db = SessionLocal()
     try:
-        row = (
-            db.query(Item)
-            .filter(Item.id == item_id, Item.store_id == store_id, Item.category_key == cat_key)
-            .first()
-        )
-        if not row:
-            raise HTTPException(status_code=404, detail="item not found")
-
-        db.delete(row)
+        it = db.query(Item).filter(
+            Item.id == item_id,
+            Item.store_id == store_id,
+            Item.set_no == set_no,
+            Item.category_key == category_key
+        ).first()
+        if not it:
+            raise HTTPException(404, "item not found")
+        db.delete(it)
         db.commit()
         return {"ok": True}
     finally:
         db.close()
 
+# Admin: help text
 @app.put("/api/admin/stores/{store_id}/helptext")
-def admin_helptext(
-    store_id: str,
-    payload: HelpTextPayload,
-    set: int = Query(default=1),
-    x_admin_token: str = Header(default="")
-):
-    require_token(x_admin_token)
-    set_no = pick_set(set)
+def admin_helptext(store_id: str, payload: HelpTextPayload, set: int = Query(1), x_admin_token: str = Header(default="")):
+    require_admin_token(x_admin_token)
+    set_no = 2 if int(set) == 2 else 1
     db = SessionLocal()
     try:
-        row = db.query(StoreMeta).filter(StoreMeta.store_id == store_id).first()
+        row = db.query(StoreHelpText).filter(StoreHelpText.store_id == store_id, StoreHelpText.set_no == set_no).first()
         if not row:
-            raise HTTPException(status_code=404, detail="store not found")
-
-        if set_no == 1:
-            row.help_text1 = payload.text or ""
+            row = StoreHelpText(store_id=store_id, set_no=set_no, text=payload.text)
+            db.add(row)
         else:
-            row.help_text2 = payload.text or ""
-
-        row.updated_at = datetime.utcnow()
+            row.text = payload.text
         db.commit()
-        return {"ok": True, "set": set_no, "updated_at": row.updated_at.isoformat()}
+        return {"ok": True}
     finally:
         db.close()
 
+# Admin: categories + deleted category items cleanup
 @app.put("/api/admin/stores/{store_id}/categories")
-def admin_categories(
-    store_id: str,
-    payload: CategoriesPayload,
-    set: int = Query(default=1),
-    x_admin_token: str = Header(default="")
-):
-    require_token(x_admin_token)
-    set_no = pick_set(set)
+def admin_categories(store_id: str, payload: CategoriesPayload, set: int = Query(1), x_admin_token: str = Header(default="")):
+    require_admin_token(x_admin_token)
+    set_no = 2 if int(set) == 2 else 1
     db = SessionLocal()
     try:
-        row = db.query(StoreMeta).filter(StoreMeta.store_id == store_id).first()
+        import json
+
+        row = db.query(StoreCategories).filter(StoreCategories.store_id == store_id, StoreCategories.set_no == set_no).first()
         if not row:
-            raise HTTPException(status_code=404, detail="store not found")
+            row = StoreCategories(store_id=store_id, set_no=set_no, categories_json="[]")
+            db.add(row)
 
-        cats = [{"key": c.key, "label": c.label} for c in payload.categories]
-        if set_no == 1:
-            row.categories1_json = json.dumps(cats, ensure_ascii=False)
-        else:
-            row.categories2_json = json.dumps(cats, ensure_ascii=False)
-
-        row.updated_at = datetime.utcnow()
-
+        # 삭제된 카테고리 품목들 서버에서 실제 삭제
         deleted_keys = payload.deleted_keys or []
-        deleted_keys = [k.strip() for k in deleted_keys if isinstance(k, str) and k.strip()]
         if deleted_keys:
-            (
-                db.query(Item)
-                .filter(Item.store_id == store_id, Item.category_key.in_(deleted_keys))
-                .delete(synchronize_session=False)
-            )
+            db.query(Item).filter(
+                Item.store_id == store_id,
+                Item.set_no == set_no,
+                Item.category_key.in_(deleted_keys)
+            ).delete(synchronize_session=False)
 
+        row.categories_json = json.dumps(payload.categories or [], ensure_ascii=False)
         db.commit()
-        return {"ok": True, "set": set_no, "deleted_keys": deleted_keys, "updated_at": row.updated_at.isoformat()}
+        return {"ok": True}
     finally:
         db.close()
