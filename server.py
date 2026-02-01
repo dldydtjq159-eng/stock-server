@@ -27,6 +27,24 @@ def db():
 def init_db():
     con = db()
     cur = con.cursor()
+    # 기본 카테고리 (최초 1회만 생성)
+    default_categories = [
+        "닭", "소스", "용기", "조미료",
+        "식용유", "떡", "면", "야채"
+    ]
+
+    for store_id in ["store1", "store2"]:
+        for idx, name in enumerate(default_categories):
+            cur.execute("""
+                INSERT OR IGNORE INTO categories(id, store_id, name, ord)
+                VALUES (?, ?, ?, ?)
+            """, (
+                f"{store_id}_{idx}",
+                store_id,
+                name,
+                idx
+            ))
+    
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS stores (
@@ -229,3 +247,4 @@ def shortage(store_id: str):
         result.append(d)
 
     return {"shortage": result}
+
