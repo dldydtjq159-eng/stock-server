@@ -1,4 +1,4 @@
-# server.py (FINAL INTEGRATED) - stock-server v5.0
+# server.py (FINAL INTEGRATED) - stock-server v5.1
 import os
 import time
 import sqlite3
@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 SERVICE = "stock-server"
-VERSION = "5.0"
+VERSION = "5.1"
 
 DATA_DIR = os.getenv("DATA_DIR", "/data")
 DB_PATH = os.getenv("DB_PATH", os.path.join(DATA_DIR, "stock.db"))
@@ -111,9 +111,11 @@ def init_db():
             keep[name] = r["id"]
         else:
             dups.append((r["id"], keep[name]))
+
     for dup_id, keep_id in dups:
         con.execute("UPDATE categories SET store_id=? WHERE store_id=?", (keep_id, dup_id))
         con.execute("UPDATE items SET store_id=? WHERE store_id=?", (keep_id, dup_id))
+
         for cs in ("ingredients", "recipes"):
             has_keep = con.execute(
                 "SELECT 1 FROM ui_texts WHERE store_id=? AND category_set=?",
@@ -123,6 +125,7 @@ def init_db():
                 "SELECT 1 FROM ui_texts WHERE store_id=? AND category_set=?",
                 (dup_id, cs)
             ).fetchone()
+
             if has_dup and not has_keep:
                 con.execute(
                     "UPDATE ui_texts SET store_id=? WHERE store_id=? AND category_set=?",
@@ -130,6 +133,7 @@ def init_db():
                 )
             elif has_dup and has_keep:
                 con.execute("DELETE FROM ui_texts WHERE store_id=? AND category_set=?", (dup_id, cs))
+
         con.execute("DELETE FROM stores WHERE id=?", (dup_id,))
     con.commit()
 
@@ -159,6 +163,7 @@ def init_db():
                         "INSERT INTO categories(store_id, category_set, name, position) VALUES (?,?,?,?)",
                         (s["id"], cs, name, i)
                     )
+
                 con.execute(
                     "INSERT OR REPLACE INTO ui_texts(store_id, category_set, usage_text, updated_at) VALUES (?,?,?,?)",
                     (s["id"], cs,
@@ -388,11 +393,9 @@ def delete_category(
         con.close()
         raise HTTPException(404, "Category not found")
 
-    # cascade delete items via FK
     con.execute("DELETE FROM categories WHERE id=?", (category_id,))
     con.commit()
 
-    # re-number positions
     rows = con.execute(
         "SELECT id FROM categories WHERE store_id=? AND category_set=? ORDER BY position, id",
         (store_id, category_set)
@@ -467,10 +470,7 @@ def list_items(
     return [dict(r) for r in rows]
 
 @app.get("/api/items_all", response_model=List[ItemOut])
-def list_items_all(
-    store_id: int = Query(...),
-    category_set: str = Query(...)
-):
+def list_items_all(store_id: int = Query(...), category_set: str = Query(...)):
     validate_set(category_set)
     con = _conn()
     rows = con.execute(
@@ -595,7 +595,7 @@ def delete_item(item_id: int, store_id: int = Query(...), category_set: str = Qu
     con.close()
     return {"ok": True}
 
-# ---------------- Shortages (min 기준) ----------------
+# ---------------- Shortages ----------------
 @app.get("/api/shortages")
 def list_shortages(store_id: int = Query(...), category_set: str = Query(...)):
     validate_set(category_set)
