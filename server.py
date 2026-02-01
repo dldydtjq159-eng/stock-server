@@ -26,21 +26,15 @@ def require_token(x_admin_token: str):
     if not ADMIN_TOKEN or x_admin_token != ADMIN_TOKEN:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-# -------------------------
-# Models
-# -------------------------
 class StoreMeta(Base):
     __tablename__ = "store_meta"
     id = Column(Integer, primary_key=True, autoincrement=True)
     store_id = Column(String, unique=True, index=True)
     store_name = Column(String, default="")
-
     categories1_json = Column(Text, default="[]")
     categories2_json = Column(Text, default="[]")
-
     help_text1 = Column(Text, default="")
     help_text2 = Column(Text, default="")
-
     updated_at = Column(DateTime, default=datetime.utcnow)
 
 class Item(Base):
@@ -50,18 +44,16 @@ class Item(Base):
     category_key = Column(String, index=True)
     name = Column(String, index=True)
 
-    # 문자열 메모 필드
-    real_stock = Column(String, default="")   # 실재고 메모(문자)
+    real_stock = Column(String, default="")
     price = Column(String, default="")
     vendor = Column(String, default="")
     storage = Column(String, default="")
     origin = Column(String, default="")
     note = Column(Text, default="")
 
-    # ✅ 숫자 필드(부족목록 계산은 이걸로만!)
-    stock_num = Column(Integer, default=0)    # 현재고(숫자)
-    min_stock = Column(Integer, default=0)    # 기준재고(숫자)
-    unit = Column(String, default="")         # 단위(개/kg 등)
+    stock_num = Column(Integer, default=0)
+    min_stock = Column(Integer, default=0)
+    unit = Column(String, default="")
 
     updated_at = Column(DateTime, default=datetime.utcnow)
 
@@ -71,11 +63,9 @@ class Item(Base):
 
 Base.metadata.create_all(bind=engine)
 
-# ---- SQLite 마이그레이션(안정 버전) ----
 def ensure_columns():
     if not DB_URL.startswith("sqlite"):
         return
-
     with engine.connect() as conn:
         cols = conn.exec_driver_sql("PRAGMA table_info(items)").fetchall()
         names = {c[1] for c in cols}
@@ -106,9 +96,6 @@ def ensure_columns():
 
 ensure_columns()
 
-# -------------------------
-# Defaults
-# -------------------------
 DEFAULT_STORES = [
     {"id": "kitchenlab", "name": "김경영 요리 연구소"},
     {"id": "youthhall", "name": "청년회관"},
@@ -144,7 +131,6 @@ DEFAULT_HELP_1 = (
     "4) 현재고(숫자) + 기준재고(숫자) 설정\n"
     "5) 현재고 < 기준재고면 ‘부족목록’에 필요수량이 뜹니다.\n"
 )
-
 DEFAULT_HELP_2 = "세트2도 동일하게 카테고리를 따로 관리합니다."
 
 def ensure_store_meta():
@@ -181,9 +167,6 @@ ensure_store_meta()
 def pick_set(set_no: int) -> int:
     return 2 if int(set_no) == 2 else 1
 
-# -------------------------
-# Schemas
-# -------------------------
 class Category(BaseModel):
     key: str
     label: str
@@ -218,9 +201,6 @@ class ItemUpdate(BaseModel):
     min_stock: int = 0
     unit: str = ""
 
-# -------------------------
-# Helpers
-# -------------------------
 def item_to_dict(r: Item):
     return {
         "id": r.id,
@@ -239,9 +219,6 @@ def item_to_dict(r: Item):
         "updated_at": r.updated_at.isoformat() if r.updated_at else None,
     }
 
-# -------------------------
-# Routes
-# -------------------------
 @app.get("/health")
 def health():
     return {"ok": True, "service": "stock-server", "version": "3.5"}
@@ -281,7 +258,6 @@ def store_meta(store_id: str, set: int = Query(default=1)):
     finally:
         db.close()
 
-# ---- Items (no token needed) ----
 @app.get("/api/items/{store_id}/{cat_key}")
 def list_items(store_id: str, cat_key: str):
     db = SessionLocal()
@@ -392,7 +368,6 @@ def delete_item(store_id: str, cat_key: str, item_id: int):
     finally:
         db.close()
 
-# ---- Admin: categories/helptext (세트별) ----
 @app.put("/api/admin/stores/{store_id}/helptext")
 def admin_helptext(
     store_id: str,
