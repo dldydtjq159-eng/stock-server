@@ -435,3 +435,5 @@ def admin_categories(store_id: str, payload: CategoriesPayload, set: int = Query
         return {"ok": True}
     finally:
         db.close()
+
+
