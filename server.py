@@ -1,133 +1,183 @@
-# server.py (STABLE FINAL)
-
-from fastapi import FastAPI, HTTPException
+# server.py
+import os, sqlite3, uuid, time
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import sqlite3, os
-from datetime import datetime
 
-DATA_DIR = "/data"
+SERVICE = "stock-server"
+VERSION = "A-1.0"
+
+DATA_DIR = os.getenv("DATA_DIR", "/data")
 os.makedirs(DATA_DIR, exist_ok=True)
-DB = f"{DATA_DIR}/stock.db"
+DB_PATH = os.path.join(DATA_DIR, "stock.db")
 
-app = FastAPI(title="stock-server", version="FINAL")
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "dldydtjq159")
 
+app = FastAPI(title=SERVICE, version=VERSION)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["*"],
     allow_headers=["*"],
+    allow_methods=["*"],
 )
 
-def now():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
 def db():
-    con = sqlite3.connect(DB)
-    con.row_factory = sqlite3.Row
-    return con
+    return sqlite3.connect(DB_PATH)
 
-@app.on_event("startup")
-def init():
+def require_admin(x_admin_token: str | None):
+    if x_admin_token != ADMIN_TOKEN:
+        raise HTTPException(401, "Unauthorized")
+
+def init_db():
     con = db()
     cur = con.cursor()
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS stores(
         id TEXT PRIMARY KEY,
-        name TEXT
+        name TEXT NOT NULL
     )""")
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS categories(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT PRIMARY KEY,
         store_id TEXT,
-        name TEXT
+        name TEXT,
+        ord INTEGER
     )""")
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS items(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        store_id TEXT,
-        category_id INTEGER,
+        id TEXT PRIMARY KEY,
+        category_id TEXT,
         name TEXT,
-        stock REAL,
-        min_stock REAL,
+        stock INTEGER,
+        min_stock INTEGER,
         unit TEXT,
-        price TEXT,
-        buy_link TEXT
+        price INTEGER,
+        link TEXT
     )""")
 
-    if cur.execute("SELECT COUNT(*) FROM stores").fetchone()[0] == 0:
-        cur.execute("INSERT INTO stores VALUES('s1','김경영 요리 연구소')")
-        cur.execute("INSERT INTO stores VALUES('s2','청년회관')")
-
+    # stores (중복 방지)
+    cur.execute("DELETE FROM stores")
+    cur.executemany(
+        "INSERT INTO stores VALUES (?,?)",
+        [
+            ("store1", "김경영 요리 연구소"),
+            ("store2", "청년회관"),
+        ]
+    )
     con.commit()
     con.close()
 
+init_db()
+
+@app.get("/")
+def root():
+    return {"ok": True, "service": SERVICE, "version": VERSION}
+
+# ---------- STORES ----------
 @app.get("/api/stores")
 def stores():
     con = db()
-    rows = con.execute("SELECT * FROM stores").fetchall()
+    rows = con.execute("SELECT id,name FROM stores").fetchall()
     con.close()
-    return {"stores": [dict(r) for r in rows]}
+    return [{"id": r[0], "name": r[1]} for r in rows]
 
-@app.get("/api/categories")
+# ---------- CATEGORIES ----------
+@app.get("/api/categories/{store_id}")
 def categories(store_id: str):
     con = db()
     rows = con.execute(
-        "SELECT * FROM categories WHERE store_id=?", (store_id,)
+        "SELECT id,name,ord FROM categories WHERE store_id=? ORDER BY ord",
+        (store_id,)
     ).fetchall()
     con.close()
-    return {"categories": [dict(r) for r in rows]}
+    return [{"id": r[0], "name": r[1], "ord": r[2]} for r in rows]
 
-@app.post("/api/categories")
-def add_category(store_id: str, name: str):
+@app.post("/api/categories/{store_id}")
+def add_category(store_id: str, data: dict, x_admin_token: str | None = Header(None)):
+    require_admin(x_admin_token)
+    cid = str(uuid.uuid4())
     con = db()
-    con.execute("INSERT INTO categories(store_id,name) VALUES(?,?)",
-                (store_id, name))
+    cur = con.cursor()
+    cur.execute(
+        "INSERT INTO categories VALUES (?,?,?,?)",
+        (cid, store_id, data["name"], int(time.time()))
+    )
     con.commit()
     con.close()
-    return {"ok": True}
+    return {"id": cid}
 
-@app.get("/api/items")
-def items(store_id: str, category_id: int):
+# ---------- ITEMS ----------
+@app.get("/api/items/{category_id}")
+def items(category_id: str):
     con = db()
     rows = con.execute("""
-        SELECT * FROM items
-        WHERE store_id=? AND category_id=?
-    """, (store_id, category_id)).fetchall()
+        SELECT id,name,stock,min_stock,unit,price,link
+        FROM items WHERE category_id=?
+    """, (category_id,)).fetchall()
     con.close()
-    return {"items": [dict(r) for r in rows]}
+    return [
+        {
+            "id": r[0], "name": r[1],
+            "stock": r[2], "min_stock": r[3],
+            "unit": r[4], "price": r[5],
+            "link": r[6]
+        } for r in rows
+    ]
 
-@app.post("/api/items")
-def add_item(data: dict):
+@app.post("/api/items/{category_id}")
+def add_item(category_id: str, data: dict):
+    iid = str(uuid.uuid4())
     con = db()
     con.execute("""
-        INSERT INTO items(store_id,category_id,name,stock,min_stock,unit,price,buy_link)
-        VALUES(?,?,?,?,?,?,?,?)
+        INSERT INTO items VALUES (?,?,?,?,?,?,?)
     """, (
-        data["store_id"],
-        data["category_id"],
-        data["name"],
+        iid, category_id, data["name"],
         data.get("stock", 0),
         data.get("min_stock", 0),
         data.get("unit", ""),
-        data.get("price", ""),
-        data.get("buy_link", "")
+        data.get("price", 0),
+        data.get("link", "")
+    ))
+    con.commit()
+    con.close()
+    return {"id": iid}
+
+@app.put("/api/items/{item_id}")
+def update_item(item_id: str, data: dict):
+    con = db()
+    con.execute("""
+        UPDATE items SET
+        stock=?, min_stock=?, unit=?, price=?, link=?
+        WHERE id=?
+    """, (
+        data["stock"], data["min_stock"],
+        data["unit"], data["price"],
+        data["link"], item_id
     ))
     con.commit()
     con.close()
     return {"ok": True}
 
-@app.get("/api/shortages")
-def shortages(store_id: str):
+# ---------- SHORTAGE ----------
+@app.get("/api/shortage/{store_id}")
+def shortage(store_id: str):
     con = db()
     rows = con.execute("""
-        SELECT c.name category, i.name, i.stock, i.min_stock,
-               (i.min_stock - i.stock) need, i.unit, i.price, i.buy_link
-        FROM items i
-        JOIN categories c ON c.id=i.category_id
-        WHERE i.store_id=? AND i.stock < i.min_stock
+    SELECT c.name, i.name, i.stock, i.min_stock, i.unit
+    FROM items i
+    JOIN categories c ON i.category_id=c.id
+    WHERE c.store_id=? AND i.stock < i.min_stock
     """, (store_id,)).fetchall()
     con.close()
-    return {"shortages": [dict(r) for r in rows]}
+
+    return [
+        {
+            "category": r[0],
+            "item": r[1],
+            "stock": r[2],
+            "need": r[3] - r[2],
+            "unit": r[4],
+        } for r in rows
+    ]
