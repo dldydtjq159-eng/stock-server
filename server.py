@@ -393,9 +393,11 @@ def delete_category(
         con.close()
         raise HTTPException(404, "Category not found")
 
+    # cascade delete items via FK
     con.execute("DELETE FROM categories WHERE id=?", (category_id,))
     con.commit()
 
+    # re-number positions
     rows = con.execute(
         "SELECT id FROM categories WHERE store_id=? AND category_set=? ORDER BY position, id",
         (store_id, category_set)
@@ -470,7 +472,10 @@ def list_items(
     return [dict(r) for r in rows]
 
 @app.get("/api/items_all", response_model=List[ItemOut])
-def list_items_all(store_id: int = Query(...), category_set: str = Query(...)):
+def list_items_all(
+    store_id: int = Query(...),
+    category_set: str = Query(...)
+):
     validate_set(category_set)
     con = _conn()
     rows = con.execute(
@@ -595,7 +600,7 @@ def delete_item(item_id: int, store_id: int = Query(...), category_set: str = Qu
     con.close()
     return {"ok": True}
 
-# ---------------- Shortages ----------------
+# ---------------- Shortages (min 기준) ----------------
 @app.get("/api/shortages")
 def list_shortages(store_id: int = Query(...), category_set: str = Query(...)):
     validate_set(category_set)
