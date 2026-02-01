@@ -1,19 +1,22 @@
 import os
+import json
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
-from fastapi import FastAPI, Header, HTTPException, Query, Request
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException, Header, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 # =========================================================
-# Config
+# Basic Config
 # =========================================================
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
+APP_VERSION = "4.0"
+
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")  # Railway Variables에 설정
 DB_URL = os.getenv("DB_URL", "sqlite:////data/stock.db")  # Railway Volume: /data
 
-app = FastAPI(title="Stock Cloud", version="3.4")
+app = FastAPI(title="Stock Cloud", version=APP_VERSION)
 
 engine = create_engine(
     DB_URL,
@@ -22,86 +25,69 @@ engine = create_engine(
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
 
-def require_admin_token(x_admin_token: str):
+
+def require_admin(x_admin_token: str):
     if not ADMIN_TOKEN or x_admin_token != ADMIN_TOKEN:
         raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def norm_menu(v: Optional[int]) -> int:
+    return 2 if int(v or 1) == 2 else 1
+
 
 # =========================================================
 # DB Models
 # =========================================================
 class Store(Base):
     __tablename__ = "stores"
-    id = Column(String, primary_key=True)  # store_id
+    id = Column(String, primary_key=True)
     name = Column(String, nullable=False)
 
-class StoreHelpText(Base):
-    __tablename__ = "store_help_text"
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    store_id = Column(String, nullable=False)
-    menu_no = Column(Integer, default=1)   # ✅ set_no -> menu_no (DB 컬럼명은 새로 안 만들고, 코드에서만 의미 변경)
-    text = Column(Text, default="")
 
-class StoreCategories(Base):
-    __tablename__ = "store_categories"
+class StoreMeta(Base):
+    """
+    store_id + menu_no 별로 categories/help를 저장
+    """
+    __tablename__ = "store_meta"
     id = Column(Integer, primary_key=True, autoincrement=True)
     store_id = Column(String, nullable=False)
-    menu_no = Column(Integer, default=1)   # ✅ set_no -> menu_no
+    menu_no = Column(Integer, default=1)
+
     categories_json = Column(Text, default="[]")
+    help_text = Column(Text, default="")
+
 
 class Item(Base):
     __tablename__ = "items"
     id = Column(Integer, primary_key=True, autoincrement=True)
 
     store_id = Column(String, nullable=False)
-    menu_no = Column(Integer, default=1)   # ✅ set_no -> menu_no
-
+    menu_no = Column(Integer, default=1)
     category_key = Column(String, nullable=False)
+
     name = Column(String, nullable=False)
 
-    stock_num = Column(Integer, default=0)
-    min_stock = Column(Integer, default=0)
+    # 부족목록 계산용(숫자)
+    stock_num = Column(Integer, default=0)   # 현재고
+    min_stock = Column(Integer, default=0)   # 기준재고
     unit = Column(String, default="")
 
-    real_stock = Column(String, default="")
+    # 상세 정보(문자)
+    real_stock = Column(String, default="")  # 실재고 메모
     price = Column(String, default="")
     vendor = Column(String, default="")
     storage = Column(String, default="")
     origin = Column(String, default="")
     note = Column(String, default="")
-
     buy_url = Column(String, default="")
 
     updated_at = Column(DateTime, default=datetime.utcnow)
 
+
 Base.metadata.create_all(bind=engine)
 
 # =========================================================
-# SQLite 컬럼 자동 추가(기존 DB 유지)
-# =========================================================
-def sqlite_has_column(table: str, column: str) -> bool:
-    if not DB_URL.startswith("sqlite"):
-        return True
-    with engine.connect() as conn:
-        rows = conn.exec_driver_sql(f"PRAGMA table_info({table});").fetchall()
-        cols = [r[1] for r in rows]
-        return column in cols
-
-def sqlite_add_column(table: str, ddl: str):
-    if not DB_URL.startswith("sqlite"):
-        return
-    with engine.connect() as conn:
-        conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {ddl};")
-
-try:
-    if not sqlite_has_column("items", "buy_url"):
-        sqlite_add_column("items", "buy_url TEXT DEFAULT ''")
-    if not sqlite_has_column("items", "note"):
-        sqlite_add_column("items", "note TEXT DEFAULT ''")
-except Exception:
-    pass
-
-# =========================================================
-# Defaults (seed)
+# Seed Defaults (중복 방지)
 # =========================================================
 DEFAULT_STORES = [
     {"id": "kky", "name": "김경영 요리 연구소"},
@@ -121,45 +107,32 @@ DEFAULT_CATEGORIES = [
 
 DEFAULT_HELP = (
     "▶ 카테고리 클릭 → 품목 추가/선택 → 저장\n"
-    "▶ 기준재고(숫자) + 현재고(숫자)를 입력하면 부족목록이 자동 계산됩니다.\n"
-    "▶ 구매링크를 넣으면 버튼으로 바로 사이트 열 수 있어요.\n"
+    "▶ 부족목록은 (기준재고 > 0) 그리고 (현재고 < 기준재고) 일 때 표시됩니다.\n"
+    "▶ 구매링크를 입력하면 버튼으로 사이트를 바로 열 수 있어요.\n"
 )
 
-def norm_menu(v: int) -> int:
-    return 2 if int(v) == 2 else 1
-
 def ensure_defaults():
-    import json
     db = SessionLocal()
     try:
+        # stores seed
         for st in DEFAULT_STORES:
-            ex = db.query(Store).filter(Store.id == st["id"]).first()
-            if not ex:
+            if not db.query(Store).filter(Store.id == st["id"]).first():
                 db.add(Store(id=st["id"], name=st["name"]))
         db.commit()
 
+        # store_meta seed (menu 1,2)
         for st in DEFAULT_STORES:
             for menu_no in (1, 2):
-                c = db.query(StoreCategories).filter(
-                    StoreCategories.store_id == st["id"],
-                    StoreCategories.menu_no == menu_no
+                row = db.query(StoreMeta).filter(
+                    StoreMeta.store_id == st["id"],
+                    StoreMeta.menu_no == menu_no
                 ).first()
-                if not c:
-                    db.add(StoreCategories(
+                if not row:
+                    db.add(StoreMeta(
                         store_id=st["id"],
                         menu_no=menu_no,
-                        categories_json=json.dumps(DEFAULT_CATEGORIES, ensure_ascii=False)
-                    ))
-
-                h = db.query(StoreHelpText).filter(
-                    StoreHelpText.store_id == st["id"],
-                    StoreHelpText.menu_no == menu_no
-                ).first()
-                if not h:
-                    db.add(StoreHelpText(
-                        store_id=st["id"],
-                        menu_no=menu_no,
-                        text=DEFAULT_HELP
+                        categories_json=json.dumps(DEFAULT_CATEGORIES, ensure_ascii=False),
+                        help_text=DEFAULT_HELP
                     ))
         db.commit()
     finally:
@@ -171,7 +144,8 @@ ensure_defaults()
 # Schemas
 # =========================================================
 class ItemCreate(BaseModel):
-    name: str
+    name: str = Field(..., min_length=1)
+
     stock_num: int = 0
     min_stock: int = 0
     unit: str = ""
@@ -183,6 +157,7 @@ class ItemCreate(BaseModel):
     origin: str = ""
     note: str = ""
     buy_url: str = ""
+
 
 class ItemUpdate(BaseModel):
     stock_num: int = 0
@@ -197,15 +172,18 @@ class ItemUpdate(BaseModel):
     note: str = ""
     buy_url: str = ""
 
-class HelpTextPayload(BaseModel):
-    text: str = ""
 
-class CategoriesPayload(BaseModel):
+class AdminCategoriesPayload(BaseModel):
     categories: List[Dict[str, str]] = []
-    deleted_keys: List[str] = []
+    deleted_keys: List[str] = []   # 삭제한 카테고리 key 목록(서버에서 아이템도 같이 삭제)
+
+
+class AdminHelpPayload(BaseModel):
+    help_text: str = ""
+
 
 # =========================================================
-# Utils
+# Helpers
 # =========================================================
 def item_to_dict(it: Item) -> Dict[str, Any]:
     return {
@@ -214,9 +192,11 @@ def item_to_dict(it: Item) -> Dict[str, Any]:
         "menu": it.menu_no,
         "category_key": it.category_key,
         "name": it.name,
+
         "stock_num": int(it.stock_num or 0),
         "min_stock": int(it.min_stock or 0),
         "unit": it.unit or "",
+
         "real_stock": it.real_stock or "",
         "price": it.price or "",
         "vendor": it.vendor or "",
@@ -224,82 +204,76 @@ def item_to_dict(it: Item) -> Dict[str, Any]:
         "origin": it.origin or "",
         "note": it.note or "",
         "buy_url": it.buy_url or "",
+
         "updated_at": it.updated_at.isoformat() if it.updated_at else None
     }
 
-def shortage_row(it: Item) -> Dict[str, Any]:
-    stock = int(it.stock_num or 0)
-    mn = int(it.min_stock or 0)
-    need = max(0, mn - stock)
-    d = item_to_dict(it)
-    d["need_qty"] = need
-    return d
-
-def get_menu_from_query(menu: Optional[int], set_: Optional[int]) -> int:
-    # ✅ menu가 있으면 menu 우선, 없으면 set 호환
-    if menu is not None:
-        return norm_menu(menu)
-    if set_ is not None:
-        return norm_menu(set_)
-    return 1
 
 # =========================================================
 # Routes
 # =========================================================
 @app.get("/")
 def root():
-    return {"ok": True, "service": "stock-server", "version": "3.4"}
+    return {"ok": True, "service": "stock-server", "version": APP_VERSION}
+
 
 @app.get("/api/stores")
 def list_stores():
     db = SessionLocal()
     try:
         stores = db.query(Store).all()
-        by_name: Dict[str, Store] = {}
+        # 이름 중복 제거
+        by_name = {}
         for s in stores:
             nm = (s.name or "").strip()
             if nm and nm not in by_name:
                 by_name[nm] = s
         uniq = list(by_name.values())
-        uniq.sort(key=lambda x: (x.name or "").strip())
+        uniq.sort(key=lambda x: (x.name or ""))
         return {"stores": [{"id": s.id, "name": s.name} for s in uniq]}
     finally:
         db.close()
 
-@app.get("/api/stores/{store_id}/meta")
-def store_meta(store_id: str, menu: Optional[int] = Query(None), set: Optional[int] = Query(None)):
-    menu_no = get_menu_from_query(menu, set)
+
+@app.get("/api/meta/{store_id}")
+def get_meta(store_id: str, menu: int = Query(1), set: Optional[int] = Query(None)):
+    """
+    ✅ menu 파라미터가 공식.
+    ✅ 예전 호환으로 set도 받아줌.
+    """
+    menu_no = norm_menu(menu if menu is not None else set)
     db = SessionLocal()
     try:
         st = db.query(Store).filter(Store.id == store_id).first()
         if not st:
             raise HTTPException(404, "store not found")
 
-        c = db.query(StoreCategories).filter(
-            StoreCategories.store_id == store_id,
-            StoreCategories.menu_no == menu_no
-        ).first()
-        h = db.query(StoreHelpText).filter(
-            StoreHelpText.store_id == store_id,
-            StoreHelpText.menu_no == menu_no
-        ).first()
+        meta = db.query(StoreMeta).filter(StoreMeta.store_id == store_id, StoreMeta.menu_no == menu_no).first()
+        if not meta:
+            # 방어적으로 생성
+            meta = StoreMeta(
+                store_id=store_id, menu_no=menu_no,
+                categories_json=json.dumps(DEFAULT_CATEGORIES, ensure_ascii=False),
+                help_text=DEFAULT_HELP
+            )
+            db.add(meta)
+            db.commit()
+            db.refresh(meta)
 
-        import json
-        cats = json.loads(c.categories_json) if c and c.categories_json else []
-        help_text = h.text if h else ""
-
+        cats = json.loads(meta.categories_json or "[]")
         return {
             "store": {"id": st.id, "name": st.name},
             "menu": menu_no,
             "categories": cats,
-            "help_text": help_text
+            "help_text": meta.help_text or ""
         }
     finally:
         db.close()
 
+
 @app.get("/api/items/{store_id}/{category_key}")
-def list_items(store_id: str, category_key: str, menu: Optional[int] = Query(None), set: Optional[int] = Query(None)):
-    menu_no = get_menu_from_query(menu, set)
+def list_items(store_id: str, category_key: str, menu: int = Query(1), set: Optional[int] = Query(None)):
+    menu_no = norm_menu(menu if menu is not None else set)
     db = SessionLocal()
     try:
         q = db.query(Item).filter(
@@ -311,33 +285,18 @@ def list_items(store_id: str, category_key: str, menu: Optional[int] = Query(Non
     finally:
         db.close()
 
-@app.get("/api/shortage/{store_id}")
-def list_shortage(store_id: str, menu: Optional[int] = Query(None), set: Optional[int] = Query(None)):
-    menu_no = get_menu_from_query(menu, set)
-    db = SessionLocal()
-    try:
-        q = db.query(Item).filter(Item.store_id == store_id, Item.menu_no == menu_no)
-        rows = []
-        for it in q.all():
-            mn = int(it.min_stock or 0)
-            stock = int(it.stock_num or 0)
-            if mn > 0 and stock < mn:
-                rows.append(shortage_row(it))
-        rows.sort(key=lambda x: (-int(x.get("need_qty", 0)), (x.get("category_key",""), x.get("name",""))))
-        return {"items": rows}
-    finally:
-        db.close()
 
 @app.post("/api/items/{store_id}/{category_key}")
-def add_item(store_id: str, category_key: str, payload: ItemCreate, menu: Optional[int] = Query(None), set: Optional[int] = Query(None)):
-    menu_no = get_menu_from_query(menu, set)
+def add_item(store_id: str, category_key: str, payload: ItemCreate, menu: int = Query(1), set: Optional[int] = Query(None)):
+    menu_no = norm_menu(menu if menu is not None else set)
     db = SessionLocal()
     try:
+        # 이름 중복 방지
         exists = db.query(Item).filter(
             Item.store_id == store_id,
             Item.menu_no == menu_no,
             Item.category_key == category_key,
-            Item.name == payload.name
+            Item.name == payload.name.strip()
         ).first()
         if exists:
             raise HTTPException(status_code=409, detail="duplicate name")
@@ -347,9 +306,11 @@ def add_item(store_id: str, category_key: str, payload: ItemCreate, menu: Option
             menu_no=menu_no,
             category_key=category_key,
             name=payload.name.strip(),
+
             stock_num=int(payload.stock_num or 0),
             min_stock=int(payload.min_stock or 0),
             unit=payload.unit or "",
+
             real_stock=payload.real_stock or "",
             price=payload.price or "",
             vendor=payload.vendor or "",
@@ -357,6 +318,7 @@ def add_item(store_id: str, category_key: str, payload: ItemCreate, menu: Option
             origin=payload.origin or "",
             note=payload.note or "",
             buy_url=payload.buy_url or "",
+
             updated_at=datetime.utcnow()
         )
         db.add(it)
@@ -366,9 +328,10 @@ def add_item(store_id: str, category_key: str, payload: ItemCreate, menu: Option
     finally:
         db.close()
 
+
 @app.put("/api/items/{store_id}/{category_key}/{item_id}")
-def update_item(store_id: str, category_key: str, item_id: int, payload: ItemUpdate, menu: Optional[int] = Query(None), set: Optional[int] = Query(None)):
-    menu_no = get_menu_from_query(menu, set)
+def update_item(store_id: str, category_key: str, item_id: int, payload: ItemUpdate, menu: int = Query(1), set: Optional[int] = Query(None)):
+    menu_no = norm_menu(menu if menu is not None else set)
     db = SessionLocal()
     try:
         it = db.query(Item).filter(
@@ -391,6 +354,7 @@ def update_item(store_id: str, category_key: str, item_id: int, payload: ItemUpd
         it.origin = payload.origin or ""
         it.note = payload.note or ""
         it.buy_url = payload.buy_url or ""
+
         it.updated_at = datetime.utcnow()
 
         db.commit()
@@ -399,9 +363,10 @@ def update_item(store_id: str, category_key: str, item_id: int, payload: ItemUpd
     finally:
         db.close()
 
+
 @app.delete("/api/items/{store_id}/{category_key}/{item_id}")
-def delete_item(store_id: str, category_key: str, item_id: int, menu: Optional[int] = Query(None), set: Optional[int] = Query(None)):
-    menu_no = get_menu_from_query(menu, set)
+def delete_item(store_id: str, category_key: str, item_id: int, menu: int = Query(1), set: Optional[int] = Query(None)):
+    menu_no = norm_menu(menu if menu is not None else set)
     db = SessionLocal()
     try:
         it = db.query(Item).filter(
@@ -418,48 +383,57 @@ def delete_item(store_id: str, category_key: str, item_id: int, menu: Optional[i
     finally:
         db.close()
 
-# ------------------ Admin: helptext/categories ------------------
-@app.put("/api/admin/stores/{store_id}/helptext")
-def admin_helptext(
-    store_id: str,
-    payload: HelpTextPayload,
-    menu: Optional[int] = Query(None),
-    set: Optional[int] = Query(None),
-    x_admin_token: str = Header(default="")
-):
-    require_admin_token(x_admin_token)
-    menu_no = get_menu_from_query(menu, set)
+
+@app.get("/api/shortage/{store_id}")
+def shortage(store_id: str, menu: int = Query(1), set: Optional[int] = Query(None)):
+    """
+    ✅ 부족목록은 서버에서 계산해 내려줌 = PC가 흔들려도 안정적
+    """
+    menu_no = norm_menu(menu if menu is not None else set)
     db = SessionLocal()
     try:
-        row = db.query(StoreHelpText).filter(StoreHelpText.store_id == store_id, StoreHelpText.menu_no == menu_no).first()
-        if not row:
-            row = StoreHelpText(store_id=store_id, menu_no=menu_no, text=payload.text or "")
-            db.add(row)
-        else:
-            row.text = payload.text or ""
-        db.commit()
-        return {"ok": True}
+        q = db.query(Item).filter(Item.store_id == store_id, Item.menu_no == menu_no).all()
+        rows = []
+        for it in q:
+            mn = int(it.min_stock or 0)
+            st = int(it.stock_num or 0)
+            if mn > 0 and st < mn:
+                need = mn - st
+                d = item_to_dict(it)
+                d["need_qty"] = need
+                rows.append(d)
+        rows.sort(key=lambda x: (-int(x.get("need_qty", 0)), x.get("category_key",""), x.get("name","")))
+        return {"items": rows}
     finally:
         db.close()
 
-@app.put("/api/admin/stores/{store_id}/categories")
-def admin_categories(
+
+# =========================================================
+# Admin Routes (카테고리/사용문구 편집은 서버 토큰 필요)
+# =========================================================
+@app.put("/api/admin/meta/{store_id}/categories")
+def admin_update_categories(
     store_id: str,
-    payload: CategoriesPayload,
-    menu: Optional[int] = Query(None),
-    set: Optional[int] = Query(None),
+    payload: AdminCategoriesPayload,
+    menu: int = Query(1),
     x_admin_token: str = Header(default="")
 ):
-    require_admin_token(x_admin_token)
-    menu_no = get_menu_from_query(menu, set)
+    require_admin(x_admin_token)
+    menu_no = norm_menu(menu)
     db = SessionLocal()
     try:
-        import json
-        row = db.query(StoreCategories).filter(StoreCategories.store_id == store_id, StoreCategories.menu_no == menu_no).first()
-        if not row:
-            row = StoreCategories(store_id=store_id, menu_no=menu_no, categories_json="[]")
-            db.add(row)
+        meta = db.query(StoreMeta).filter(StoreMeta.store_id == store_id, StoreMeta.menu_no == menu_no).first()
+        if not meta:
+            meta = StoreMeta(
+                store_id=store_id, menu_no=menu_no,
+                categories_json=json.dumps(DEFAULT_CATEGORIES, ensure_ascii=False),
+                help_text=DEFAULT_HELP
+            )
+            db.add(meta)
+            db.commit()
+            db.refresh(meta)
 
+        # 삭제된 카테고리의 품목도 서버에서 실제 삭제
         deleted_keys = payload.deleted_keys or []
         if deleted_keys:
             db.query(Item).filter(
@@ -468,10 +442,37 @@ def admin_categories(
                 Item.category_key.in_(deleted_keys)
             ).delete(synchronize_session=False)
 
-        row.categories_json = json.dumps(payload.categories or [], ensure_ascii=False)
+        meta.categories_json = json.dumps(payload.categories or [], ensure_ascii=False)
         db.commit()
         return {"ok": True}
     finally:
         db.close()
 
 
+@app.put("/api/admin/meta/{store_id}/help")
+def admin_update_help(
+    store_id: str,
+    payload: AdminHelpPayload,
+    menu: int = Query(1),
+    x_admin_token: str = Header(default="")
+):
+    require_admin(x_admin_token)
+    menu_no = norm_menu(menu)
+    db = SessionLocal()
+    try:
+        meta = db.query(StoreMeta).filter(StoreMeta.store_id == store_id, StoreMeta.menu_no == menu_no).first()
+        if not meta:
+            meta = StoreMeta(
+                store_id=store_id, menu_no=menu_no,
+                categories_json=json.dumps(DEFAULT_CATEGORIES, ensure_ascii=False),
+                help_text=DEFAULT_HELP
+            )
+            db.add(meta)
+            db.commit()
+            db.refresh(meta)
+
+        meta.help_text = payload.help_text or ""
+        db.commit()
+        return {"ok": True}
+    finally:
+        db.close()
