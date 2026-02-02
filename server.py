@@ -1,210 +1,331 @@
-from fastapi import FastAPI, HTTPException, Header
-from fastapi.middleware.cors import CORSMiddleware
-import sqlite3
+# =========================
+# STOCK SERVER v6 (ALL-IN-ONE)
+# 레시피 자동차감 + 발주이력 + 부족알림(이메일) 포함
+# =========================
+import os, json, sqlite3, re, smtplib
+from email.mime.text import MIMEText
 from datetime import datetime
-from typing import Optional
+from flask import Flask, request, jsonify
 
-DB = "data.db"
-ADMIN_TOKEN = "dldydtjq159"
+DB = "stock.db"
 
-app = FastAPI()
+APP_EMAIL = "YOUR_GMAIL@gmail.com"
+APP_PASSWORD = "qygd kavp wxia mptz"   # ← 네가 준 앱비번 사용
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "dldydtjq159")
 
-# =====================
-# DB
-# =====================
+app = Flask(__name__)
+
+# -------- DB ----------
 def db():
-    conn = sqlite3.connect(DB)
-    conn.row_factory = sqlite3.Row
-    return conn
+    c = sqlite3.connect(DB)
+    c.row_factory = sqlite3.Row
+    return c
 
 def now():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 def init_db():
     c = db()
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS stores (
+    cur = c.cursor()
+
+    cur.executescript("""
+    CREATE TABLE IF NOT EXISTS stores(
         id TEXT PRIMARY KEY,
-        name TEXT
-    )
-    """)
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS categories (
+        name TEXT,
+        usage_text TEXT DEFAULT ''
+    );
+
+    CREATE TABLE IF NOT EXISTS categories(
         store_id TEXT,
         key TEXT,
         label TEXT,
-        sort INTEGER
-    )
-    """)
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS items (
+        sort INTEGER,
+        PRIMARY KEY(store_id, key)
+    );
+
+    CREATE TABLE IF NOT EXISTS items(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         store_id TEXT,
         category_key TEXT,
         name TEXT,
-        current_stock REAL,
-        min_stock REAL,
-        unit TEXT,
-        price TEXT,
-        vendor TEXT,
-        storage TEXT,
-        origin TEXT,
-        buy_link TEXT,
-        memo TEXT,
+        current_stock REAL DEFAULT 0,
+        min_stock REAL DEFAULT 0,
+        unit TEXT DEFAULT '',
+        price TEXT DEFAULT '',
+        vendor TEXT DEFAULT '',
+        storage TEXT DEFAULT '',
+        origin TEXT DEFAULT '',
+        buy_link TEXT DEFAULT '',
+        memo TEXT DEFAULT '',
         updated_at TEXT
-    )
+    );
+
+    CREATE TABLE IF NOT EXISTS recipes(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        store_id TEXT,
+        menu TEXT UNIQUE
+    );
+
+    CREATE TABLE IF NOT EXISTS recipe_items(
+        recipe_id INTEGER,
+        item_id INTEGER,
+        qty REAL
+    );
+
+    CREATE TABLE IF NOT EXISTS orders(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        store_id TEXT,
+        menu TEXT,
+        count INTEGER,
+        created_at TEXT
+    );
     """)
     c.commit()
     c.close()
 
 init_db()
 
-# =====================
-# STORES
-# =====================
-@app.get("/api/stores")
-def stores():
+# -------- 보안 ----------
+def check_admin():
+    token = request.headers.get("x-admin-token","")
+    if token != ADMIN_TOKEN:
+        return False
+    return True
+
+# -------- 이메일 알림 ----------
+def send_email(subject, body):
+    msg = MIMEText(body)
+    msg["Subject"] = subject
+    msg["From"] = APP_EMAIL
+    msg["To"] = APP_EMAIL
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
+        s.login(APP_EMAIL, APP_PASSWORD)
+        s.sendmail(APP_EMAIL, APP_EMAIL, msg.as_string())
+
+# -------- API ----------
+@app.route("/api/stores", methods=["GET"])
+def list_stores():
     c = db()
     rows = c.execute("SELECT * FROM stores").fetchall()
-    if not rows:
-        c.execute("INSERT INTO stores VALUES (?,?)", ("lab", "기본매장"))
-        c.execute("INSERT INTO categories VALUES (?,?,?,?)", ("lab","default","기본",0))
-        c.commit()
-        rows = c.execute("SELECT * FROM stores").fetchall()
-    return {"stores":[dict(r) for r in rows]}
+    c.close()
+    return jsonify({"stores":[dict(r) for r in rows]})
 
-@app.get("/api/stores/{store_id}/meta")
-def store_meta(store_id: str):
+@app.route("/api/stores/<sid>/meta", methods=["GET"])
+def store_meta(sid):
     c = db()
-    cats = c.execute(
-        "SELECT key,label,sort FROM categories WHERE store_id=? ORDER BY sort",
-        (store_id,)
-    ).fetchall()
-    return {
+    store = c.execute("SELECT * FROM stores WHERE id=?", (sid,)).fetchone()
+    cats = c.execute("SELECT key,label,sort FROM categories WHERE store_id=? ORDER BY sort",(sid,)).fetchall()
+    c.close()
+    return jsonify({
         "meta":{
-            "categories":[dict(r) for r in cats],
-            "usage_text":""
+            "usage_text": store["usage_text"] if store else "",
+            "categories":[dict(r) for r in cats]
         }
-    }
+    })
 
-@app.put("/api/stores/{store_id}/meta")
-def update_meta(
-    store_id: str,
-    payload: dict,
-    x_admin_token: Optional[str] = Header(None)
-):
-    if x_admin_token != ADMIN_TOKEN:
-        raise HTTPException(401,"unauthorized")
+@app.route("/api/stores/<sid>/meta", methods=["PUT"])
+def update_meta(sid):
+    if not check_admin():
+        return jsonify({"error":"unauthorized"}),401
+
+    data = request.json
+    usage = data.get("usage_text","")
+    cats = data.get("categories",[])
 
     c = db()
-    c.execute("DELETE FROM categories WHERE store_id=?", (store_id,))
-    for cat in payload.get("categories",[]):
-        c.execute(
-            "INSERT INTO categories VALUES (?,?,?,?)",
-            (store_id,cat["key"],cat["label"],cat.get("sort",0))
-        )
-    c.commit()
-    return {"ok":True}
+    c.execute("INSERT OR IGNORE INTO stores(id,name,usage_text) VALUES(?,?,?)",(sid,sid,usage))
+    c.execute("UPDATE stores SET usage_text=? WHERE id=?",(usage,sid))
+    c.execute("DELETE FROM categories WHERE store_id=?",(sid,))
 
-# =====================
-# ITEMS
-# =====================
-@app.get("/api/stores/{store_id}/items/{category_key}")
-def items(store_id:str, category_key:str):
+    for i,cx in enumerate(cats):
+        c.execute("""
+        INSERT INTO categories(store_id,key,label,sort)
+        VALUES(?,?,?,?)
+        """,(sid,cx["key"],cx["label"],i*10))
+    c.commit()
+    c.close()
+    return jsonify({"ok":True})
+
+@app.route("/api/stores/<sid>/items/<cat>", methods=["GET"])
+def items_list(sid,cat):
     c = db()
     rows = c.execute("""
-        SELECT * FROM items
-        WHERE store_id=? AND category_key=?
-        ORDER BY name
-    """,(store_id,category_key)).fetchall()
-    return {"items":[dict(r) for r in rows]}
+      SELECT * FROM items 
+      WHERE store_id=? AND category_key=?
+      ORDER BY name
+    """,(sid,cat)).fetchall()
+    c.close()
+    return jsonify({"items":[dict(r) for r in rows]})
 
-@app.post("/api/stores/{store_id}/items/{category_key}")
-def add_item(store_id:str, category_key:str, payload:dict):
+@app.route("/api/stores/<sid>/items/<cat>", methods=["POST"])
+def add_item(sid,cat):
+    data = request.json
+    name = data["name"]
+
     c = db()
+    exists = c.execute("""
+      SELECT 1 FROM items WHERE store_id=? AND category_key=? AND name=?
+    """,(sid,cat,name)).fetchone()
+    if exists:
+        return jsonify({"error":"duplicate"}),409
+
     c.execute("""
-    INSERT INTO items
-    (store_id,category_key,name,current_stock,min_stock,unit,price,vendor,storage,origin,buy_link,memo,updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+      INSERT INTO items(store_id,category_key,name,current_stock,min_stock,unit,
+        price,vendor,storage,origin,buy_link,memo,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
     """,(
-        store_id,category_key,payload["name"],
-        payload.get("current_stock",0),
-        payload.get("min_stock",0),
-        payload.get("unit",""),
-        payload.get("price",""),
-        payload.get("vendor",""),
-        payload.get("storage",""),
-        payload.get("origin",""),
-        payload.get("buy_link",""),
-        payload.get("memo",""),
+        sid,cat,name,
+        data.get("current_stock",0),
+        data.get("min_stock",0),
+        data.get("unit",""),
+        data.get("price",""),
+        data.get("vendor",""),
+        data.get("storage",""),
+        data.get("origin",""),
+        data.get("buy_link",""),
+        data.get("memo",""),
         now()
     ))
     c.commit()
-    return {"ok":True}
+    c.close()
+    return jsonify({"ok":True})
 
-@app.put("/api/stores/{store_id}/items/{category_key}/{item_id}")
-def update_item(store_id:str, category_key:str, item_id:int, payload:dict):
+@app.route("/api/stores/<sid>/items/<cat>/<iid>", methods=["PUT"])
+def update_item(sid,cat,iid):
+    data = request.json
     c = db()
     c.execute("""
-    UPDATE items SET
-    current_stock=?,
-    min_stock=?,
-    unit=?,
-    price=?,
-    vendor=?,
-    storage=?,
-    origin=?,
-    buy_link=?,
-    memo=?,
-    updated_at=?
-    WHERE id=?
+      UPDATE items SET
+        current_stock=?,
+        min_stock=?,
+        unit=?,
+        price=?,
+        vendor=?,
+        storage=?,
+        origin=?,
+        buy_link=?,
+        memo=?,
+        updated_at=?
+      WHERE id=?
     """,(
-        payload.get("current_stock",0),
-        payload.get("min_stock",0),
-        payload.get("unit",""),
-        payload.get("price",""),
-        payload.get("vendor",""),
-        payload.get("storage",""),
-        payload.get("origin",""),
-        payload.get("buy_link",""),
-        payload.get("memo",""),
+        data.get("current_stock",0),
+        data.get("min_stock",0),
+        data.get("unit",""),
+        data.get("price",""),
+        data.get("vendor",""),
+        data.get("storage",""),
+        data.get("origin",""),
+        data.get("buy_link",""),
+        data.get("memo",""),
         now(),
-        item_id
+        iid
     ))
     c.commit()
-    return {"ok":True,"updated_at":now()}
+    c.close()
+    return jsonify({"ok":True,"updated_at":now()})
 
-@app.delete("/api/stores/{store_id}/items/{category_key}/{item_id}")
-def delete_item(store_id:str, category_key:str, item_id:int):
+@app.route("/api/stores/<sid>/items/<cat>/<iid>", methods=["DELETE"])
+def delete_item(sid,cat,iid):
     c = db()
-    c.execute("DELETE FROM items WHERE id=?", (item_id,))
+    c.execute("DELETE FROM items WHERE id=?",(iid,))
     c.commit()
-    return {"ok":True}
+    c.close()
+    return jsonify({"ok":True})
 
-# =====================
-# SHORTAGES
-# =====================
-@app.get("/api/shortages/{store_id}")
-def shortages(store_id:str):
+# -------- 레시피 ----------
+@app.route("/api/recipes", methods=["POST"])
+def add_recipe():
+    data = request.json
+    menu = data["menu"]
+    store_id = data["store_id"]
+    items = data["items"]   # [{item_id, qty}]
+
+    c = db()
+    cur = c.cursor()
+    cur.execute("INSERT INTO recipes(store_id,menu) VALUES(?,?)",(store_id,menu))
+    rid = cur.lastrowid
+
+    for it in items:
+        cur.execute("""
+        INSERT INTO recipe_items(recipe_id,item_id,qty)
+        VALUES(?,?,?)
+        """,(rid,it["item_id"],it["qty"]))
+
+    c.commit()
+    c.close()
+    return jsonify({"ok":True})
+
+# -------- 주문 → 자동 차감 ----------
+@app.route("/api/recipes/use", methods=["POST"])
+def use_recipe():
+    data = request.json
+    store_id = data["store_id"]
+    menu = data["menu"]
+    count = int(data["count"])
+
+    c = db()
+    cur = c.cursor()
+
+    rid = cur.execute("SELECT id FROM recipes WHERE menu=?",(menu,)).fetchone()
+    if not rid:
+        return jsonify({"error":"recipe_not_found"}),404
+    rid = rid["id"]
+
+    rows = cur.execute("""
+      SELECT i.id, i.current_stock, ri.qty, i.min_stock, i.name
+      FROM recipe_items ri
+      JOIN items i ON i.id = ri.item_id
+      WHERE ri.recipe_id=?
+    """,(rid,)).fetchall()
+
+    shortage = []
+    for r in rows:
+        need = r["qty"] * count
+        new_stock = r["current_stock"] - need
+        cur.execute("""
+          UPDATE items SET current_stock=?, updated_at=?
+          WHERE id=?
+        """,(new_stock,now(),r["id"]))
+
+        if new_stock < r["min_stock"]:
+            shortage.append(f"{r['name']} 부족 ({new_stock})")
+
+    cur.execute("""
+      INSERT INTO orders(store_id,menu,count,created_at)
+      VALUES(?,?,?,?)
+    """,(store_id,menu,count,now()))
+
+    c.commit()
+    c.close()
+
+    if shortage:
+        send_email("재고 부족 알림", "\n".join(shortage))
+
+    return jsonify({"ok":True,"shortage":shortage})
+
+@app.route("/api/shortages/<sid>", methods=["GET"])
+def shortages(sid):
     c = db()
     rows = c.execute("""
-    SELECT i.*, c.label as category_label
-    FROM items i
-    JOIN categories c
-    ON i.category_key=c.key AND i.store_id=c.store_id
-    WHERE i.store_id=? AND i.current_stock < i.min_stock
-    """,(store_id,)).fetchall()
+      SELECT 
+        c.label as category_label,
+        i.name,
+        i.current_stock,
+        i.min_stock,
+        (i.min_stock - i.current_stock) as need,
+        i.unit,
+        i.price,
+        i.buy_link,
+        i.category_key
+      FROM items i
+      LEFT JOIN categories c 
+        ON c.store_id=i.store_id AND c.key=i.category_key
+      WHERE i.current_stock < i.min_stock
+    """,(sid,)).fetchall()
+    c.close()
+    return jsonify({"shortages":[dict(r) for r in rows]})
 
-    out=[]
-    for r in rows:
-        d=dict(r)
-        d["need"]=round(d["min_stock"]-d["current_stock"],2)
-        out.append(d)
-    return {"shortages":out}
+if __name__=="__main__":
+    app.run(host="0.0.0.0", port=5000)
