@@ -223,3 +223,12 @@ def delete_item(store_id: str, category: str, item_id: int):
     conn.execute("DELETE FROM items WHERE id=? AND store_id=?", (item_id, store_id))
     conn.commit()
     return {"ok": True}
+
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get("/")
+def root():
+    return {"ok": True, "service": "stock-server", "version": "4.0"}
+
