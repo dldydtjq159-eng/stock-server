@@ -1,25 +1,28 @@
-# server.py
 import os
-import json
+import re
 import sqlite3
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, Dict, Any
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
 
-SERVICE = "stock-server"
-VERSION = "4.1"
+# =====================
+# 기본 설정
+# =====================
+APP_VERSION = "5.0"
+SERVICE_NAME = "stock-server"
 
-# ✅ Railway에서 Volume Mount path를 /data 로 설정해야 함
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "dldydtjq159")
 DATA_DIR = os.getenv("DATA_DIR", "/data")
+
 os.makedirs(DATA_DIR, exist_ok=True)
 DB_PATH = os.path.join(DATA_DIR, "stock.db")
 
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()  # Railway Variables에서 설정 권장
-
-app = FastAPI(title=SERVICE)
+# =====================
+# FastAPI
+# =====================
+app = FastAPI(title=SERVICE_NAME, version=APP_VERSION)
 
 app.add_middleware(
     CORSMiddleware,
@@ -29,175 +32,218 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# =====================
+# 유틸
+# =====================
+def now_str():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-# -------------------------
-# DB helpers
-# -------------------------
-def now_iso() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+def slugify(text: str) -> str:
+    text = text.lower().strip()
+    text = re.sub(r"\s+", "-", text)
+    text = re.sub(r"[^a-z0-9\-]", "", text)
+    return text[:32] or "cat"
 
+def parse_float(v):
+    try:
+        return float(v)
+    except Exception:
+        return 0.0
 
-def db_connect() -> sqlite3.Connection:
-    con = sqlite3.connect(DB_PATH, check_same_thread=False)
+def require_admin(token: Optional[str]):
+    if token != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid admin token")
+
+def db():
+    con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
     return con
 
-
+# =====================
+# DB 초기화
+# =====================
 def init_db():
-    con = db_connect()
+    con = db()
     cur = con.cursor()
 
-    # stores
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS stores (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        )
-        """
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS stores (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL
     )
+    """)
 
-    # store_meta: categories_json + usage_text
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS store_meta (
-            store_id TEXT PRIMARY KEY,
-            usage_text TEXT NOT NULL DEFAULT '',
-            categories_json TEXT NOT NULL DEFAULT '[]',
-            updated_at TEXT NOT NULL,
-            FOREIGN KEY (store_id) REFERENCES stores(id) ON DELETE CASCADE
-        )
-        """
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS categories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        store_id TEXT NOT NULL,
+        key TEXT NOT NULL,
+        label TEXT NOT NULL,
+        sort INTEGER DEFAULT 0,
+        UNIQUE(store_id, key)
     )
+    """)
 
-    # items
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS items (
-            id TEXT PRIMARY KEY,
-            store_id TEXT NOT NULL,
-            category_key TEXT NOT NULL,
-            name TEXT NOT NULL,
-            current_qty REAL NOT NULL DEFAULT 0,
-            min_qty REAL NOT NULL DEFAULT 0,
-            unit TEXT NOT NULL DEFAULT '',
-            price TEXT NOT NULL DEFAULT '',
-            vendor TEXT NOT NULL DEFAULT '',
-            storage TEXT NOT NULL DEFAULT '',
-            origin TEXT NOT NULL DEFAULT '',
-            buy_link TEXT NOT NULL DEFAULT '',
-            memo TEXT NOT NULL DEFAULT '',
-            updated_at TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            UNIQUE(store_id, category_key, name),
-            FOREIGN KEY (store_id) REFERENCES stores(id) ON DELETE CASCADE
-        )
-        """
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        store_id TEXT NOT NULL,
+        category_key TEXT NOT NULL,
+        name TEXT NOT NULL,
+
+        current_stock REAL DEFAULT 0,
+        min_stock REAL DEFAULT 0,
+        unit TEXT DEFAULT "",
+
+        price TEXT DEFAULT "",
+        vendor TEXT DEFAULT "",
+        storage TEXT DEFAULT "",
+        origin TEXT DEFAULT "",
+
+        buy_link TEXT DEFAULT "",
+        memo TEXT DEFAULT "",
+
+        updated_at TEXT NOT NULL,
+
+        UNIQUE(store_id, category_key, name)
     )
+    """)
 
-    con.commit()
-    con.close()
-
-
-def ensure_default_data():
-    """
-    기본 매장 2개 + 기본 카테고리 생성(없으면)
-    """
-    con = db_connect()
-    cur = con.cursor()
-
-    default_stores = [
+    # 기본 매장 (중복 방지)
+    stores = [
         ("lab", "김경영 요리 연구소"),
         ("youth", "청년회관"),
     ]
 
-    for sid, sname in default_stores:
-        cur.execute("SELECT id FROM stores WHERE id=?", (sid,))
-        if cur.fetchone() is None:
-            cur.execute(
-                "INSERT INTO stores(id, name, created_at) VALUES (?,?,?)",
-                (sid, sname, now_iso()),
-            )
+    for sid, name in stores:
+        cur.execute(
+            "INSERT OR IGNORE INTO stores (id, name) VALUES (?, ?)",
+            (sid, name)
+        )
 
-        # meta 없으면 생성
-        cur.execute("SELECT store_id FROM store_meta WHERE store_id=?", (sid,))
-        if cur.fetchone() is None:
-            default_categories = [
-                {"key": "chicken", "label": "닭", "sort": 10},
-                {"key": "sauce", "label": "소스", "sort": 20},
-                {"key": "container", "label": "용기", "sort": 30},
-                {"key": "seasoning", "label": "조미료", "sort": 40},
-                {"key": "oil", "label": "식용유", "sort": 50},
-                {"key": "ricecake", "label": "떡", "sort": 60},
-                {"key": "noodle", "label": "면", "sort": 70},
-                {"key": "veggie", "label": "야채", "sort": 80},
-            ]
-            cur.execute(
-                """
-                INSERT INTO store_meta(store_id, usage_text, categories_json, updated_at)
-                VALUES (?,?,?,?)
-                """,
-                (sid, "카테고리 클릭 → 품목 추가/선택 → 저장", json.dumps(default_categories, ensure_ascii=False), now_iso()),
-            )
+    # 기본 카테고리
+    default_categories = [
+        ("ingredient", "식재료", 0),
+        ("recipe", "레시피", 10),
+    ]
+
+    for sid, _ in stores:
+        cnt = cur.execute(
+            "SELECT COUNT(*) FROM categories WHERE store_id=?",
+            (sid,)
+        ).fetchone()[0]
+
+        if cnt == 0:
+            for key, label, sort in default_categories:
+                cur.execute(
+                    "INSERT INTO categories (store_id, key, label, sort) VALUES (?, ?, ?, ?)",
+                    (sid, key, label, sort)
+                )
 
     con.commit()
     con.close()
 
+init_db()
 
-@app.on_event("startup")
-def _startup():
-    init_db()
-    ensure_default_data()
-
-
-# -------------------------
-# Auth
-# -------------------------
-def require_admin(x_admin_token: Optional[str]):
-    # 토큰이 비어있으면 아예 관리자 기능 막기
-    if not ADMIN_TOKEN:
-        raise HTTPException(status_code=401, detail="ADMIN_TOKEN is not set on server.")
-    if not x_admin_token or x_admin_token.strip() != ADMIN_TOKEN:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-
-# -------------------------
-# Schemas
-# -------------------------
-class StoreMetaUpdate(BaseModel):
-    usage_text: str = ""
-    categories: List[Dict[str, Any]] = Field(default_factory=list)
-
-
-class ItemCreate(BaseModel):
-    name: str
-    current_qty: float = 0
-    min_qty: float = 0
-    unit: str = ""
-    price: str = ""
-    vendor: str = ""
-    storage: str = ""
-    origin: str = ""
-    buy_link: str = ""
-    memo: str = ""
-
-
-class ItemUpdate(BaseModel):
-    current_qty: float = 0
-    min_qty: float = 0
-    unit: str = ""
-    price: str = ""
-    vendor: str = ""
-    storage: str = ""
-    origin: str = ""
-    buy_link: str = ""
-    memo: str = ""
-
-
-# -------------------------
-# Routes
-# -------------------------
+# =====================
+# API
+# =====================
 @app.get("/")
 def root():
-    return {"ok": True, "service": SERVICE
+    return {
+        "ok": True,
+        "service": SERVICE_NAME,
+        "version": APP_VERSION
+    }
+
+@app.get("/api/stores")
+def get_stores():
+    con = db()
+    rows = con.execute("SELECT id, name FROM stores ORDER BY name").fetchall()
+    con.close()
+    return {"stores": [dict(r) for r in rows]}
+
+@app.get("/api/stores/{store_id}/categories")
+def get_categories(store_id: str):
+    con = db()
+    rows = con.execute(
+        "SELECT key, label, sort FROM categories WHERE store_id=? ORDER BY sort",
+        (store_id,)
+    ).fetchall()
+    con.close()
+    return {"categories": [dict(r) for r in rows]}
+
+@app.get("/api/stores/{store_id}/items/{category_key}")
+def list_items(store_id: str, category_key: str):
+    con = db()
+    rows = con.execute(
+        "SELECT * FROM items WHERE store_id=? AND category_key=? ORDER BY name",
+        (store_id, category_key)
+    ).fetchall()
+    con.close()
+    return {"items": [dict(r) for r in rows]}
+
+@app.post("/api/stores/{store_id}/items/{category_key}")
+def add_item(store_id: str, category_key: str, payload: Dict[str, Any]):
+    name = payload.get("name", "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name required")
+
+    con = db()
+    try:
+        con.execute("""
+        INSERT INTO items (
+            store_id, category_key, name,
+            current_stock, min_stock, unit,
+            price, vendor, storage, origin,
+            buy_link, memo, updated_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            store_id,
+            category_key,
+            name,
+            parse_float(payload.get("current_stock")),
+            parse_float(payload.get("min_stock")),
+            payload.get("unit", ""),
+            payload.get("price", ""),
+            payload.get("vendor", ""),
+            payload.get("storage", ""),
+            payload.get("origin", ""),
+            payload.get("buy_link", ""),
+            payload.get("memo", ""),
+            now_str()
+        ))
+        con.commit()
+    except sqlite3.IntegrityError:
+        con.close()
+        raise HTTPException(status_code=409, detail="Item already exists")
+
+    con.close()
+    return {"ok": True}
+
+@app.get("/api/shortages/{store_id}")
+def shortages(store_id: str):
+    con = db()
+    rows = con.execute(
+        "SELECT * FROM items WHERE store_id=?",
+        (store_id,)
+    ).fetchall()
+
+    result = []
+    for r in rows:
+        need = (r["min_stock"] or 0) - (r["current_stock"] or 0)
+        if need > 0:
+            result.append({
+                "category": r["category_key"],
+                "name": r["name"],
+                "current_stock": r["current_stock"],
+                "min_stock": r["min_stock"],
+                "need": need,
+                "unit": r["unit"],
+                "price": r["price"],
+                "buy_link": r["buy_link"],
+                "updated_at": r["updated_at"]
+            })
+
+    con.close()
+    return {"shortages": result}
