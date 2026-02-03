@@ -126,4 +126,15 @@ def delete_item(item_id: int):
     conn.commit()
     conn.close()
     return {"message": f"item {item_id} deleted"}
+
+@app.get("/api/stores")
+def api_stores():
+    return {
+        "ok": True,
+        "stores": [
+            {"id": 1, "name": "기본매장"},
+            {"id": 2, "name": "테스트매장"}
+        ]
+    }
     
+
