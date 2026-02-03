@@ -174,7 +174,16 @@ def ok():
 
 @app.get("/version")
 def version():
-    return {"version": APP_VERSION}
+    return {"service": SERVICE, "version": APP_VERSION, "status": "running", "time": datetime.utcnow().isoformat()}
+
+@app.get("/")
+def root():
+    return {"ok": True, "service": SERVICE, "version": APP_VERSION, "hint": "use /ok/version or /version"}
+
+@app.get("/ok/version")
+def ok_version():
+    # alias for compatibility
+    return {"service": SERVICE, "version": APP_VERSION, "status": "running", "time": datetime.utcnow().isoformat()}
 
 # ---------------- Stores ----------------
 @app.get("/api/stores")
@@ -388,12 +397,3 @@ def list_order_history(store_id: str, limit: int = 50):
     for r in rows:
         out.append({"id": r["id"], "created_at": r["created_at"], "payload": json_loads(r["payload_json"])})
     return {"history": out}
-
-@app.get("/ok/version")
-def ok_version():
-    return {
-        "service": "stock-server",
-        "version": "5.0",
-        "status": "running",
-        "time": datetime.now().isoformat()
-    }
