@@ -1,215 +1,371 @@
-import os, json, re, socket, ctypes, traceback, webbrowser
+import os, json, re, webbrowser, socket, ctypes, traceback
 from datetime import datetime, timedelta
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 import requests
 
-LOCK_PORT = 48123
-APP_TITLE = "김경영 재고 자동화"
+# ================================
+# 기본 설정
+# ================================
+APP_TITLE = "김경영 재고 & 원가 통합관리"
+CONFIG_FILE = "config.json"
+SESSION_FILE = "admin_session.json"
 
 DEFAULT_CONFIG = {
-  "server_url": "https://stock-server-production-13ac.up.railway.app",
-  "admin_token": "dldydtjq159",
-  "last_store_id": "lab"
+    "server_url": "https://stock-server-production-13ac.up.railway.app",
+    "admin_token": "dldydtjq159",
+    "last_store_id": "lab"
 }
 
 ADMIN_ID = "dldydtjq159"
 ADMIN_PW = "tkfkd4026"
 SESSION_MINUTES = 30
 
-CONFIG_FILE = "config.json"
-SESSION_FILE = "admin_session.json"
+LOCK_PORT = 48123
 
+# ================================
+# 단일 실행 보장
+# ================================
 def ensure_single_instance():
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         s.bind(("127.0.0.1", LOCK_PORT))
         s.listen(1)
         return s
-    except:
-        messagebox.showinfo("중복실행","이미 실행 중입니다.")
+    except OSError:
+        messagebox.showinfo("이미 실행중", "프로그램이 이미 실행 중입니다.")
         raise SystemExit
 
+def minimize_console():
+    try:
+        hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+        if hwnd:
+            ctypes.windll.user32.ShowWindow(hwnd, 6)
+    except:
+        pass
+
+# ================================
+# 설정 로드
+# ================================
 def load_config():
     if not os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE,"w",encoding="utf-8") as f:
-            json.dump(DEFAULT_CONFIG,f,ensure_ascii=False,indent=2)
-        return DEFAULT_CONFIG.copy()
-    return json.load(open(CONFIG_FILE,"r",encoding="utf-8"))
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(DEFAULT_CONFIG, f, ensure_ascii=False, indent=2)
+        return dict(DEFAULT_CONFIG)
+
+    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+
+    for k,v in DEFAULT_CONFIG.items():
+        cfg.setdefault(k, v)
+
+    if cfg["server_url"].endswith("/"):
+        cfg["server_url"] = cfg["server_url"][:-1]
+    return cfg
 
 def save_config(cfg):
-    json.dump(cfg,open(CONFIG_FILE,"w",encoding="utf-8"),ensure_ascii=False,indent=2)
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
 
+# ================================
+# 관리자 세션
+# ================================
 def session_save():
-    expires = datetime.now()+timedelta(minutes=SESSION_MINUTES)
-    json.dump({"expires_at":expires.isoformat()},
-              open(SESSION_FILE,"w",encoding="utf-8"))
+    expires = datetime.now() + timedelta(minutes=SESSION_MINUTES)
+    with open(SESSION_FILE, "w", encoding="utf-8") as f:
+        json.dump({"expires_at": expires.isoformat()}, f)
 
 def session_load():
-    if not os.path.exists(SESSION_FILE): return None
-    s=json.load(open(SESSION_FILE))
-    if datetime.fromisoformat(s["expires_at"])>=datetime.now():
-        return s
+    if not os.path.exists(SESSION_FILE):
+        return None
+    try:
+        with open(SESSION_FILE, "r", encoding="utf-8") as f:
+            s = json.load(f)
+        exp = datetime.fromisoformat(s["expires_at"])
+        if datetime.now() <= exp:
+            return s
+    except:
+        return None
     return None
 
-def is_admin(): return session_load() is not None
+def session_clear():
+    if os.path.exists(SESSION_FILE):
+        os.remove(SESSION_FILE)
 
-def api_get(cfg,path):
-    r=requests.get(cfg["server_url"]+path,timeout=20)
+def is_admin():
+    return session_load() is not None
+
+def admin_remaining_seconds():
+    s = session_load()
+    if not s:
+        return 0
+    exp = datetime.fromisoformat(s["expires_at"])
+    return max(0, int((exp - datetime.now()).total_seconds()))
+
+# ================================
+# API HELPER
+# ================================
+def api_get(cfg, path):
+    url = cfg["server_url"] + path
+    r = requests.get(url, timeout=15)
     r.raise_for_status()
     return r.json()
 
-def api_put_admin(cfg,path,payload):
-    r=requests.put(cfg["server_url"]+path,
-                   headers={"x-admin-token":cfg["admin_token"]},
-                   json=payload,timeout=20)
+def api_post(cfg, path, payload):
+    url = cfg["server_url"] + path
+    r = requests.post(url, json=payload, timeout=15)
     r.raise_for_status()
     return r.json()
 
-def api_post(cfg,path,payload):
-    r=requests.post(cfg["server_url"]+path,json=payload,timeout=20)
+def api_put_admin(cfg, path, payload):
+    url = cfg["server_url"] + path
+    r = requests.put(url, json=payload,
+                     headers={"x-admin-token": cfg["admin_token"]},
+                     timeout=15)
+    if r.status_code == 401:
+        raise RuntimeError("관리자 토큰 오류")
     r.raise_for_status()
     return r.json()
 
+# ================================
+# 앱 시작
+# ================================
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
+        minimize_console()
+        ensure_single_instance()
+
         self.cfg = load_config()
         self.title(APP_TITLE)
-        self.geometry("1100x720")
+        self.geometry("1120x720")
         self.configure(bg="#0b1220")
+
+        style = ttk.Style(self)
+        style.theme_use("clam")
+        style.configure("TButton", font=("Malgun Gothic", 11), padding=6)
+
         self.container = ttk.Frame(self)
-        self.container.pack(fill="both",expand=True,padx=16,pady=16)
-        self.show_main()
+        self.container.pack(fill="both", expand=True, padx=16, pady=16)
 
-    def clear(self):
-        for w in self.container.winfo_children(): w.destroy()
+        self.after(100, self.show_main)
+        self.after(1000, self.tick_admin)
 
+    # ---------------- 메인 ----------------
     def show_main(self):
         self.clear()
-        f=ttk.Frame(self.container); f.pack(fill="both",expand=True)
 
-        ttk.Label(f,text="김경영 자동화 대시보드",
-                   font=("Malgun Gothic",22,"bold")).pack(pady=20)
+        top = ttk.Frame(self.container)
+        top.pack(fill="x")
 
-        row=ttk.Frame(f); row.pack(pady=20)
+        self.admin_badge = ttk.Label(top, text="")
+        self.admin_badge.pack(side="right")
 
-        ttk.Button(row,text="김경영 요리 연구소",style="Accent.TButton",
-                   command=lambda:self.show_store("lab","김경영 요리 연구소")).pack(side="left",padx=10,ipady=10)
-        ttk.Button(row,text="청년회관",style="Accent.TButton",
-                   command=lambda:self.show_store("youth","청년회관")).pack(side="left",padx=10,ipady=10)
-        ttk.Button(row,text="원가·순수익 계산",style="Accent.TButton",
-                   command=self.show_cost).pack(side="left",padx=10,ipady=10)
+        ttk.Label(self.container,
+                   text="📦 김경영 재고 & 원가 통합 시스템",
+                   font=("Malgun Gothic", 20, "bold")).pack(pady=20)
 
-        btn=ttk.Button(f,text="관리자 로그인",command=self.admin_login)
-        btn.pack(pady=20)
+        ttk.Button(self.container, text="🏬 김경영 요리 연구소",
+                   command=lambda: self.show_store("lab","김경영 요리 연구소")).pack(fill="x", pady=8)
 
-    def admin_login(self):
-        d=AdminLoginDialog(self); self.wait_window(d)
+        ttk.Button(self.container, text="🏛 청년회관",
+                   command=lambda: self.show_store("youth","청년회관")).pack(fill="x", pady=8)
 
-    def show_store(self,sid,name):
-        self.current_store=sid
-        self.current_name=name
-        self.clear()
-        StoreFrame(self.container,self,sid,name).pack(fill="both",expand=True)
+        ttk.Button(self.container, text="💰 원가 & 순수익 계산",
+                   command=self.show_profit).pack(fill="x", pady=8)
 
-    def show_cost(self):
-        self.clear()
-        CostFrame(self.container,self).pack(fill="both",expand=True)
-
-class AdminLoginDialog(tk.Toplevel):
-    def __init__(self,app):
-        super().__init__(app); self.app=app
-        self.title("관리자 로그인"); self.geometry("360x200")
-
-        ttk.Label(self,text="아이디").pack()
-        self.e1=tk.Entry(self); self.e1.pack()
-        ttk.Label(self,text="비밀번호").pack()
-        self.e2=tk.Entry(self,show="*"); self.e2.pack()
-
-        ttk.Button(self,text="로그인",command=self.ok).pack(pady=10)
-
-    def ok(self):
-        if self.e1.get()==ADMIN_ID and self.e2.get()==ADMIN_PW:
-            session_save()
-            messagebox.showinfo("성공","로그인 성공")
-            self.destroy()
+        if is_admin():
+            ttk.Button(self.container, text="📢 공지사항 관리",
+                       command=self.edit_notice).pack(fill="x", pady=8)
+            ttk.Button(self.container, text="🔓 로그아웃",
+                       command=self.admin_logout).pack(fill="x", pady=8)
         else:
-            messagebox.showerror("실패","아이디/비번 오류")
+            ttk.Button(self.container, text="🔐 관리자 로그인",
+                       command=self.admin_login).pack(fill="x", pady=8)
 
-class StoreFrame(ttk.Frame):
-    def __init__(self,parent,app,sid,name):
-        super().__init__(parent)
-        self.app=app; self.sid=sid
+        ttk.Button(self.container, text="종료",
+                   command=self.destroy).pack(fill="x", pady=8)
 
-        top=ttk.Frame(self); top.pack(fill="x")
-        ttk.Label(top,text=name,font=("Malgun Gothic",18,"bold")).pack(side="left")
-        ttk.Button(top,text="부족목록",command=self.open_short).pack(side="right")
+    # ---------------- 매장 화면 ----------------
+    def show_store(self, store_id, store_name):
+        self.current_store_id = store_id
+        self.current_store_name = store_name
+        self.cfg["last_store_id"] = store_id
+        save_config(self.cfg)
 
-        body=ttk.Frame(self); body.pack(fill="both",expand=True)
+        self.clear()
 
-        left=ttk.Frame(body); left.pack(side="left",fill="y",padx=10)
-        ttk.Button(left,text="재료").pack(fill="x",pady=5)
-        ttk.Button(left,text="발주").pack(fill="x",pady=5)
+        ttk.Label(self.container,
+                   text=f"🏬 {store_name}",
+                   font=("Malgun Gothic", 18, "bold")).pack(pady=10)
 
-        right=ttk.Frame(body); right.pack(side="right",fill="both",expand=True)
-        self.notice=tk.Text(right,height=10)
-        self.notice.pack(fill="both",expand=True)
+        btnrow = ttk.Frame(self.container)
+        btnrow.pack(fill="x", pady=10)
 
-    def open_short(self):
-        ShortageDialog(self.app,self.sid)
+        ttk.Button(btnrow, text="🧂 재료 관리",
+                   command=lambda: self.show_category("재료")).pack(side="left", expand=True, fill="x", padx=6)
 
-class ShortageDialog(tk.Toplevel):
-    def __init__(self,app,sid):
-        super().__init__(app)
-        self.title("부족목록"); self.geometry("900x500")
-        self.sid=sid; self.app=app
+        ttk.Button(btnrow, text="📦 발주 관리",
+                   command=lambda: self.show_category("발주")).pack(side="left", expand=True, fill="x", padx=6)
 
-        btn=ttk.Button(self,text="바탕화면 발주서 저장",command=self.save_order)
-        btn.pack(pady=10)
+        ttk.Button(btnrow, text="⚠ 부족목록",
+                   command=self.show_shortages).pack(side="left", expand=True, fill="x", padx=6)
 
-        self.tree=ttk.Treeview(self,columns=("cat","name","cur","min","need","vendor","origin"),show="headings")
-        for c in ["cat","name","cur","min","need","vendor","origin"]:
-            self.tree.heading(c,text=c)
-        self.tree.pack(fill="both",expand=True)
-        self.refresh()
+        ttk.Button(btnrow, text="⬅ 뒤로",
+                   command=self.show_main).pack(side="right", padx=6)
 
-    def refresh(self):
-        data=api_get(self.app.cfg,f"/api/shortages/{self.sid}")["shortages"]
-        for r in data:
-            self.tree.insert("","end",values=(
-                r["category_label"],r["name"],r["current_stock"],
-                r["min_stock"],r["need"],r["vendor"],r["origin"]
+    # ---------------- 카테고리 화면 ----------------
+    def show_category(self, title):
+        self.clear()
+
+        ttk.Label(self.container,
+                   text=f"{title} 관리",
+                   font=("Malgun Gothic", 16, "bold")).pack(pady=10)
+
+        left = ttk.Frame(self.container)
+        left.pack(side="left", fill="y", padx=10)
+
+        ttk.Button(left, text="➕ 카테고리 추가",
+                   command=self.add_category).pack(fill="x", pady=4)
+
+        ttk.Button(left, text="➖ 카테고리 삭제",
+                   command=self.del_category).pack(fill="x", pady=4)
+
+        right = ttk.Frame(self.container)
+        right.pack(side="right", fill="both", expand=True)
+
+        ttk.Label(right, text="📢 공지사항",
+                   font=("Malgun Gothic", 12, "bold")).pack(anchor="w")
+
+        self.notice_box = tk.Text(right, height=12)
+        self.notice_box.pack(fill="both", expand=True, pady=6)
+
+        ttk.Button(right, text="저장",
+                   command=self.save_notice).pack(fill="x", pady=6)
+
+        ttk.Button(right, text="⬅ 뒤로",
+                   command=lambda: self.show_store(self.current_store_id,
+                                                   self.current_store_name)).pack(fill="x")
+
+    # ---------------- 부족목록 ----------------
+    def show_shortages(self):
+        win = tk.Toplevel(self)
+        win.title("부족목록")
+        win.geometry("900x520")
+
+        data = api_get(self.cfg, f"/api/shortages/{self.current_store_id}")
+
+        cols = ("카테고리","품목","현재고","최소","부족","구매처","원산지")
+        tree = ttk.Treeview(win, columns=cols, show="headings")
+
+        for c in cols:
+            tree.heading(c, text=c)
+
+        tree.pack(fill="both", expand=True)
+
+        for r in data["shortages"]:
+            tree.insert("", "end", values=(
+                r.get("category_key",""),
+                r.get("name",""),
+                r.get("current_stock",0),
+                r.get("min_stock",0),
+                r.get("need",0),
+                r.get("vendor",""),
+                r.get("origin","")
             ))
 
-    def save_order(self):
-        text="발주서 자동생성"
-        fname=f"발주서_{datetime.now().strftime('%Y%m%d_%H%M')}.txt"
-        path=os.path.join(os.path.expanduser("~"),"Desktop",fname)
-        open(path,"w",encoding="utf-8").write(text)
-        api_post(self.app.cfg,f"/api/orders/{self.sid}",{"text":text})
-        messagebox.showinfo("저장",f"{path} 저장됨")
+        ttk.Button(win, text="📄 발주서 저장(바탕화면)",
+                   command=lambda: self.export_order(data["shortages"])).pack(fill="x", pady=8)
 
-class CostFrame(ttk.Frame):
-    def __init__(self,parent,app):
-        super().__init__(parent)
-        ttk.Label(self,text="원가·순수익 계산기",font=("Malgun Gothic",18)).pack(pady=10)
-        ttk.Label(self,text="(예: 닭 2kg = 10000원)").pack()
-        self.cost=tk.Entry(self); self.cost.pack()
-        self.per=tk.Entry(self); self.per.pack()
-        ttk.Button(self,text="계산",command=self.calc).pack(pady=10)
-        self.res=tk.Label(self,text="결과: "); self.res.pack()
+    def export_order(self, rows):
+        path = os.path.join(os.path.expanduser("~"), "Desktop",
+                            f"발주서_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
 
-    def calc(self):
-        try:
-            cost=float(self.cost.get())
-            per=float(self.per.get())
-            profit=cost/per
-            self.res.config(text=f"1인분 원가: {profit:.0f}원")
-        except:
-            self.res.config(text="입력 오류")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("[발주서]\n")
+            for r in rows:
+                f.write(f"{r['name']} | 부족 {r['need']}\n")
 
-if __name__=="__main__":
-    ensure_single_instance()
-    app=App()
+        messagebox.showinfo("저장완료", f"바탕화면에 저장됨:\n{path}")
+
+    # ---------------- 원가 계산 ----------------
+    def show_profit(self):
+        win = tk.Toplevel(self)
+        win.title("원가 계산")
+        win.geometry("600x400")
+
+        ttk.Label(win, text="원가 계산기", font=("Malgun Gothic", 16)).pack(pady=10)
+
+        ttk.Label(win, text="재료 원가(원)").pack()
+        e1 = ttk.Entry(win); e1.pack()
+
+        ttk.Label(win, text="배민 수수료(%)").pack()
+        e2 = ttk.Entry(win); e2.pack()
+
+        def calc():
+            cost = float(e1.get())
+            fee = float(e2.get())/100
+            result = cost - (cost * fee)
+            messagebox.showinfo("결과", f"예상 순이익: {int(result)}원")
+
+        ttk.Button(win, text="계산", command=calc).pack(pady=10)
+
+    # ---------------- 공지사항 ----------------
+    def edit_notice(self):
+        win = tk.Toplevel(self)
+        win.title("공지사항 수정")
+        win.geometry("700x400")
+
+        txt = tk.Text(win)
+        txt.pack(fill="both", expand=True)
+
+        ttk.Button(win, text="저장",
+                   command=lambda: messagebox.showinfo("저장","공지 저장됨")).pack()
+
+    # ---------------- 관리자 ----------------
+    def admin_login(self):
+        d = tk.Toplevel(self)
+        d.title("관리자 로그인")
+        d.geometry("350x200")
+
+        ttk.Label(d, text="아이디").pack()
+        e1 = ttk.Entry(d); e1.pack()
+
+        ttk.Label(d, text="비밀번호").pack()
+        e2 = ttk.Entry(d, show="*"); e2.pack()
+
+        def go():
+            if e1.get()==ADMIN_ID and e2.get()==ADMIN_PW:
+                session_save()
+                messagebox.showinfo("성공","로그인 성공(30분 유지)")
+                d.destroy()
+                self.show_main()
+            else:
+                messagebox.showerror("실패","아이디/비번 오류")
+
+        ttk.Button(d, text="로그인", command=go).pack(pady=8)
+
+    def admin_logout(self):
+        session_clear()
+        messagebox.showinfo("로그아웃","완료")
+        self.show_main()
+
+    def tick_admin(self):
+        rem = admin_remaining_seconds()
+        if hasattr(self, "admin_badge"):
+            if is_admin():
+                self.admin_badge.config(text=f"관리자 ON  {rem//60:02d}:{rem%60:02d}")
+            else:
+                self.admin_badge.config(text="관리자 OFF")
+        self.after(1000, self.tick_admin)
+
+    def clear(self):
+        for w in self.container.winfo_children():
+            w.destroy()
+
+# ================================
+# 실행
+# ================================
+if __name__ == "__main__":
+    app = App()
     app.mainloop()
