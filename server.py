@@ -388,3 +388,12 @@ def list_order_history(store_id: str, limit: int = 50):
     for r in rows:
         out.append({"id": r["id"], "created_at": r["created_at"], "payload": json_loads(r["payload_json"])})
     return {"history": out}
+
+@app.get("/ok/version")
+def ok_version():
+    return {
+        "service": "stock-server",
+        "version": "5.0",
+        "status": "running",
+        "time": datetime.now().isoformat()
+    }
