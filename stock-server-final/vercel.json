@@ -1,0 +1,7 @@
+
+{
+  "routes": [
+    { "src": "^/$", "dest": "/server.py" },
+    { "src": "^/api/(.*)", "dest": "/server.py" }
+  ]
+}
