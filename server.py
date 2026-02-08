@@ -1,3 +1,4 @@
+
 import os, json, time
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,7 +8,7 @@ import jwt
 
 app = FastAPI()
 
-# ✅ CORS 추가 (이게 없으면 PC앱이 차단됨)
+# CORS (필수)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -35,7 +36,6 @@ def _save(path, obj):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
-# 초기 데이터
 admins = _load(
     ADMINS_FILE,
     {"superadmin":{"id":SUPER_ID,"pw_hash":pwd.hash(SUPER_PW)},"admins":[]}
