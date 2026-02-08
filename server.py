@@ -143,3 +143,8 @@ def save_store(store: str, body: dict):
     data.setdefault("byStore",{})[store] = body.get("store_data",{})
     _save(DATA_FILE, data)
     return {"ok":True}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("server:app", host="0.0.0.0", port=8080, reload=False)
+
