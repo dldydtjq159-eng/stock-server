@@ -1,6 +1,5 @@
-
 import os, json, time
-from fastapi import FastAPI, HTTPException, Header, Depends
+from fastapi import FastAPI, HTTPException, Header, Request
 from pydantic import BaseModel
 from passlib.context import CryptContext
 import jwt
@@ -25,16 +24,8 @@ def _save(path, obj):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
-# initialize storage
-admins = _load(ADMINS_FILE, {
-    "superadmin":{"id":SUPER_ID,"pw_hash":pwd.hash(SUPER_PW)},
-    "admins":[]
-})
-data = _load(DATA_FILE, {
-    "stores":["김경영 요리 연구소","청년회관"],
-    "byStore":{},
-    "lastSync":""
-})
+admins = _load(ADMINS_FILE, {"superadmin":{"id":SUPER_ID,"pw_hash":pwd.hash(SUPER_PW)},"admins":[]})
+data = _load(DATA_FILE, {"stores":["김경영 요리 연구소","청년회관"],"byStore":{},"lastSync":""})
 _save(ADMINS_FILE, admins)
 _save(DATA_FILE, data)
 
@@ -45,7 +36,7 @@ class LoginReq(BaseModel):
 class AdminAddReq(BaseModel):
     id: str
     pw: str
-    name: str|None=None
+    name: str | None = None
 
 @app.get("/storeapp/v1/version")
 def version():
@@ -53,30 +44,21 @@ def version():
 
 @app.post("/storeapp/v1/auth/login")
 def login(req: LoginReq):
-    if req.id==SUPER_ID and pwd.verify(req.pw, admins["superadmin"]["pw_hash"]):
-        token = jwt.encode(
-            {"sub":req.id,"super":True,"exp":int(time.time())+1800},
-            SECRET, algorithm="HS256"
-        )
+    if req.id == SUPER_ID and pwd.verify(req.pw, admins["superadmin"]["pw_hash"]):
+        token = jwt.encode({"sub":req.id,"super":True,"exp":int(time.time())+1800}, SECRET, algorithm="HS256")
         return {"token":token, "is_super":True}
 
     for a in admins["admins"]:
-        if a["id"]==req.id and pwd.verify(req.pw, a["pw_hash"]):
-            token = jwt.encode(
-                {"sub":req.id,"super":False,"exp":int(time.time())+1800},
-                SECRET, algorithm="HS256"
-            )
+        if a["id"] == req.id and pwd.verify(req.pw, a["pw_hash"]):
+            token = jwt.encode({"sub":req.id,"super":False,"exp":int(time.time())+1800}, SECRET, algorithm="HS256")
             return {"token":token, "is_super":False}
 
     raise HTTPException(status_code=401, detail="Invalid id or password")
 
-def _auth_super(auth: str = Header(None)):
-    if not auth:
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
-
-    # FastAPI Header may not be a string, so cast safely
-    if not isinstance(auth, str) or not auth.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Invalid Authorization header")
+def _auth_super(request: Request):
+    auth = request.headers.get("authorization")
+    if not auth or not auth.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing Bearer token")
 
     tok = auth.split(" ",1)[1]
     try:
@@ -85,33 +67,34 @@ def _auth_super(auth: str = Header(None)):
         raise HTTPException(status_code=401, detail="Invalid token")
 
     if not dec.get("super"):
-        raise HTTPException(status_code=403, detail="Not super admin")
+        raise HTTPException(status_code=403, detail="Super admin only")
 
     return dec
 
 @app.get("/storeapp/v1/auth/admins")
 def list_admins():
     return {
-        "admins":[
-            {"id":SUPER_ID,"name":"슈퍼","is_super":True}
+        "admins": [
+            {"id": SUPER_ID, "name": "슈퍼", "is_super": True}
         ] + [
-            {"id":a["id"],"name":a.get("name",""),"is_super":False}
+            {"id": a["id"], "name": a.get("name",""), "is_super": False}
             for a in admins["admins"]
         ]
     }
 
 @app.post("/storeapp/v1/auth/admins")
-def add_admin(req: AdminAddReq, dec=Depends(_auth_super)):
-    if any(a["id"]==req.id for a in admins["admins"]):
-        raise HTTPException(400, detail="exists")
+def add_admin(req: AdminAddReq, request: Request):
+    dec = _auth_super(request)
+    if any(a["id"] == req.id for a in admins["admins"]):
+        raise HTTPException(status_code=400, detail="exists")
 
     admins["admins"].append({
-        "id":req.id,
-        "pw_hash":pwd.hash(req.pw),
-        "name":req.name
+        "id": req.id,
+        "pw_hash": pwd.hash(req.pw),
+        "name": req.name
     })
     _save(ADMINS_FILE, admins)
-    return {"ok":True}
+    return {"ok": True}
 
 @app.get("/storeapp/v1/data")
 def get_all():
@@ -122,7 +105,7 @@ def save_all(body: dict):
     global data
     data = body.get("data", data)
     _save(DATA_FILE, data)
-    return {"ok":True}
+    return {"ok": True}
 
 @app.get("/storeapp/v1/store/{store}")
 def get_store(store: str):
@@ -132,4 +115,4 @@ def get_store(store: str):
 def save_store(store: str, body: dict):
     data.setdefault("byStore",{})[store] = body.get("store_data",{})
     _save(DATA_FILE, data)
-    return {"ok":True}
+    return {"ok": True}
