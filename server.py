@@ -1,22 +1,11 @@
 
 import os, json, time
-from fastapi import FastAPI, HTTPException, Header
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, HTTPException, Header, Depends
 from pydantic import BaseModel
 from passlib.context import CryptContext
 import jwt
 
 app = FastAPI()
-
-# CORS (필수)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 pwd = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
 SUPER_ID = os.environ.get("SUPERADMIN_ID", "dldydtjq159")
@@ -36,16 +25,16 @@ def _save(path, obj):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
-admins = _load(
-    ADMINS_FILE,
-    {"superadmin":{"id":SUPER_ID,"pw_hash":pwd.hash(SUPER_PW)},"admins":[]}
-)
-
-data = _load(
-    DATA_FILE,
-    {"stores":["김경영 요리 연구소","청년회관"],"byStore":{},"lastSync":""}
-)
-
+# initialize storage
+admins = _load(ADMINS_FILE, {
+    "superadmin":{"id":SUPER_ID,"pw_hash":pwd.hash(SUPER_PW)},
+    "admins":[]
+})
+data = _load(DATA_FILE, {
+    "stores":["김경영 요리 연구소","청년회관"],
+    "byStore":{},
+    "lastSync":""
+})
 _save(ADMINS_FILE, admins)
 _save(DATA_FILE, data)
 
@@ -56,7 +45,7 @@ class LoginReq(BaseModel):
 class AdminAddReq(BaseModel):
     id: str
     pw: str
-    name: str | None = None
+    name: str|None=None
 
 @app.get("/storeapp/v1/version")
 def version():
@@ -64,37 +53,39 @@ def version():
 
 @app.post("/storeapp/v1/auth/login")
 def login(req: LoginReq):
-    if req.id == SUPER_ID and pwd.verify(req.pw, admins["superadmin"]["pw_hash"]):
+    if req.id==SUPER_ID and pwd.verify(req.pw, admins["superadmin"]["pw_hash"]):
         token = jwt.encode(
             {"sub":req.id,"super":True,"exp":int(time.time())+1800},
-            SECRET,
-            algorithm="HS256"
+            SECRET, algorithm="HS256"
         )
         return {"token":token, "is_super":True}
 
     for a in admins["admins"]:
-        if a["id"] == req.id and pwd.verify(req.pw, a["pw_hash"]):
+        if a["id"]==req.id and pwd.verify(req.pw, a["pw_hash"]):
             token = jwt.encode(
                 {"sub":req.id,"super":False,"exp":int(time.time())+1800},
-                SECRET,
-                algorithm="HS256"
+                SECRET, algorithm="HS256"
             )
             return {"token":token, "is_super":False}
 
     raise HTTPException(status_code=401, detail="Invalid id or password")
 
 def _auth_super(auth: str = Header(None)):
-    if not auth or not auth.startswith("Bearer "):
-        raise HTTPException(401)
+    if not auth:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+
+    # FastAPI Header may not be a string, so cast safely
+    if not isinstance(auth, str) or not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid Authorization header")
 
     tok = auth.split(" ",1)[1]
     try:
         dec = jwt.decode(tok, SECRET, algorithms=["HS256"])
-    except:
-        raise HTTPException(401)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
     if not dec.get("super"):
-        raise HTTPException(403)
+        raise HTTPException(status_code=403, detail="Not super admin")
 
     return dec
 
@@ -110,8 +101,8 @@ def list_admins():
     }
 
 @app.post("/storeapp/v1/auth/admins")
-def add_admin(req: AdminAddReq, dec=_auth_super()):
-    if any(a["id"] == req.id for a in admins["admins"]):
+def add_admin(req: AdminAddReq, dec=Depends(_auth_super)):
+    if any(a["id"]==req.id for a in admins["admins"]):
         raise HTTPException(400, detail="exists")
 
     admins["admins"].append({
@@ -119,7 +110,6 @@ def add_admin(req: AdminAddReq, dec=_auth_super()):
         "pw_hash":pwd.hash(req.pw),
         "name":req.name
     })
-
     _save(ADMINS_FILE, admins)
     return {"ok":True}
 
@@ -143,8 +133,3 @@ def save_store(store: str, body: dict):
     data.setdefault("byStore",{})[store] = body.get("store_data",{})
     _save(DATA_FILE, data)
     return {"ok":True}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("server:app", host="0.0.0.0", port=8080, reload=False)
-
