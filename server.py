@@ -277,21 +277,3 @@ def save_store(store_name: str, body: SaveStoreReq, user=Depends(require_auth)):
         d.setdefault("stores", []).append(store_name)
     _save_data(d)
     return {"ok": True, "lastSync": d.get("lastSync", "")}
-from fastapi import FastAPI
-
-app = FastAPI()
-
-# ===========================
-# ✅ PC앱 업데이트 체크용 API
-# ===========================
-
-SERVER_VERSION = "1.0.1"   # ← 여기 바꾸면 업데이트 감지됨
-
-@app.get("/storeapp/v1/version")
-def get_version():
-    return {
-        "version": SERVER_VERSION,
-        "message": "OK"
-    }
-
-
