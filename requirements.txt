@@ -1,5 +1,7 @@
-fastapi==0.115.6
-uvicorn[standard]==0.30.6
-python-multipart==0.0.9
-PyJWT==2.9.0
-passlib==1.7.4
+fastapi
+uvicorn[standard]
+python-multipart
+PyJWT
+passlib[bcrypt]
+requests
+PyQt5
