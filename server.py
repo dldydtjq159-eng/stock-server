@@ -18,7 +18,8 @@ SUPERADMIN_PW = os.environ.get("SUPERADMIN_PW", "tkfkd4026")
 
 JWT_ALG = "HS256"
 JWT_TTL_SEC = 60 * 60 * 12  # 12h
-pwd_ctx = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
+pwd_ctx = pwd_ctx = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
+
 
 # ============================================================
 # Storage (simple JSON file; Railway filesystem is ephemeral)
@@ -249,4 +250,5 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", "8080"))
     uvicorn.run("server:app", host="0.0.0.0", port=port)
+
 
