@@ -8,6 +8,29 @@ app.use(express.json());
 // 🗄 라이센스 저장소 (DB 대신 메모리)
 // ======================
 
+// ======================
+// 💰 코드 자동 생성 API
+// ======================
+
+app.post("/payment-success", (req, res) => {
+
+  const duration = req.body.duration;
+
+  const code = generateLicense(duration);
+
+  licenses.push({
+    code: code,
+    duration: duration,
+    activated: false,
+    device: null,
+    expire: null
+  });
+
+  console.log("🆕 코드 생성:", code);
+
+  res.json({ code: code });
+});
+
 app.get("/", (req, res) => {
   res.send("🔥 License Server Running");
 });
