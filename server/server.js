@@ -8,6 +8,10 @@ app.use(express.json());
 // 🗄 라이센스 저장소 (DB 대신 메모리)
 // ======================
 
+app.get("/", (req, res) => {
+  res.send("🔥 License Server Running");
+});
+
 let licenses = [];
 
 
