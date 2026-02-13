@@ -3,13 +3,10 @@ const app = express();
 
 app.use(express.json());
 
+
 // ======================
 // 🗄 라이센스 저장소 (DB 대신 메모리)
 // ======================
-
-app.get("/", (req, res) => {
-  res.send("License Server Running 🔐");
-});
 
 let licenses = [];
 
@@ -51,7 +48,16 @@ function getExpire(duration) {
 
 
 // ======================
-// 💰 결제 성공 → 코드 자동 생성
+// 🏠 메인 페이지 (정상 확인용)
+// ======================
+
+app.get("/", (req, res) => {
+  res.send("🔥 License Server Running");
+});
+
+
+// ======================
+// 💰 결제 성공 → 코드 생성
 // ======================
 
 app.post("/payment-success", (req, res) => {
@@ -119,9 +125,11 @@ app.get("/licenses", (req, res) => {
 
 
 // ======================
-// 🚀 서버 시작
+// 🚀 서버 시작 (클라우드용)
 // ======================
 
-app.listen(3000, () => {
-  console.log("🔥 License server running on http://localhost:3000");
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  console.log(`🔥 License server running on port ${PORT}`);
 });
