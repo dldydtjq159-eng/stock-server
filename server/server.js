@@ -8,33 +8,6 @@ app.use(express.json());
 // 🗄 라이센스 저장소 (DB 대신 메모리)
 // ======================
 
-// ======================
-// 💰 코드 자동 생성 API
-// ======================
-
-app.post("/payment-success", (req, res) => {
-
-  const duration = req.body.duration;
-
-  const code = generateLicense(duration);
-
-  licenses.push({
-    code: code,
-    duration: duration,
-    activated: false,
-    device: null,
-    expire: null
-  });
-
-  console.log("🆕 코드 생성:", code);
-
-  res.json({ code: code });
-});
-
-app.get("/", (req, res) => {
-  res.send("🔥 License Server Running");
-});
-
 let licenses = [];
 
 
@@ -75,7 +48,7 @@ function getExpire(duration) {
 
 
 // ======================
-// 🏠 메인 페이지 (정상 확인용)
+// 🏠 메인 페이지
 // ======================
 
 app.get("/", (req, res) => {
@@ -84,12 +57,12 @@ app.get("/", (req, res) => {
 
 
 // ======================
-// 💰 결제 성공 → 코드 생성
+// 💰 코드 자동 생성 API
 // ======================
 
 app.post("/payment-success", (req, res) => {
 
-  const duration = req.body.duration; // "7D", "30D", "LIFE"
+  const duration = req.body.duration; // 7D, 30D, LIFE
 
   const code = generateLicense(duration);
 
@@ -121,14 +94,14 @@ app.post("/activate", (req, res) => {
     return res.json({ success: false, reason: "INVALID_CODE" });
   }
 
-  // 첫 활성화
+  // 첫 실행 시 활성화
   if (!lic.activated) {
     lic.activated = true;
     lic.device = device;
     lic.expire = getExpire(lic.duration);
   }
 
-  // 다른 PC에서 사용 시 차단
+  // 다른 PC 사용 차단
   if (lic.device !== device) {
     return res.json({ success: false, reason: "DEVICE_MISMATCH" });
   }
@@ -143,7 +116,7 @@ app.post("/activate", (req, res) => {
 
 
 // ======================
-// 📊 코드 목록 확인 (관리자용)
+// 📊 코드 목록 (관리자용)
 // ======================
 
 app.get("/licenses", (req, res) => {
