@@ -3,66 +3,19 @@ const app = express();
 
 app.use(express.json());
 
-
-// ======================
-// 🗄 라이센스 저장소 (DB 대신 메모리)
-// ======================
-
 let licenses = [];
 
-
-// ======================
-// 🔑 코드 자동 생성
-// ======================
-
 function generateLicense(duration) {
-
-  const rand = Math.random()
-    .toString(36)
-    .substring(2, 10)
-    .toUpperCase();
-
+  const rand = Math.random().toString(36).substring(2, 10).toUpperCase();
   return `PRO-${duration}-${rand}`;
 }
-
-
-// ======================
-// ⏳ 만료일 계산
-// ======================
-
-function getExpire(duration) {
-
-  let now = new Date();
-
-  if (duration === "7D")
-    now.setDate(now.getDate() + 7);
-
-  if (duration === "30D")
-    now.setDate(now.getDate() + 30);
-
-  if (duration === "LIFE")
-    return null;
-
-  return now;
-}
-
-
-// ======================
-// 🏠 메인 페이지
-// ======================
-
-app.get("/", (req, res) => {
-  res.send("🔥 License Server Running");
-});
-
 
 // ======================
 // 💰 코드 자동 생성 API
 // ======================
-
 app.post("/payment-success", (req, res) => {
 
-  const duration = req.body.duration; // 7D, 30D, LIFE
+  const duration = req.body.duration;
 
   const code = generateLicense(duration);
 
@@ -79,57 +32,17 @@ app.post("/payment-success", (req, res) => {
   res.json({ code: code });
 });
 
-
-// ======================
-// 🔐 프로그램 인증 API
-// ======================
-
-app.post("/activate", (req, res) => {
-
-  const { code, device } = req.body;
-
-  const lic = licenses.find(l => l.code === code);
-
-  if (!lic) {
-    return res.json({ success: false, reason: "INVALID_CODE" });
-  }
-
-  // 첫 실행 시 활성화
-  if (!lic.activated) {
-    lic.activated = true;
-    lic.device = device;
-    lic.expire = getExpire(lic.duration);
-  }
-
-  // 다른 PC 사용 차단
-  if (lic.device !== device) {
-    return res.json({ success: false, reason: "DEVICE_MISMATCH" });
-  }
-
-  // 만료 확인
-  if (lic.expire && new Date() > lic.expire) {
-    return res.json({ success: false, reason: "EXPIRED" });
-  }
-
-  res.json({ success: true });
-});
-
-
-// ======================
-// 📊 코드 목록 (관리자용)
-// ======================
-
+// 코드 목록 확인
 app.get("/licenses", (req, res) => {
   res.json(licenses);
 });
 
-
-// ======================
-// 🚀 서버 시작 (클라우드용)
-// ======================
+// 서버 확인용
+app.get("/", (req, res) => {
+  res.send("License Server Running 🚀");
+});
 
 const PORT = process.env.PORT || 3000;
-
 app.listen(PORT, () => {
-  console.log(`🔥 License server running on port ${PORT}`);
+  console.log("License server running on port " + PORT);
 });
