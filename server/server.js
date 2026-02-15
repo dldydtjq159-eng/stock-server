@@ -1,122 +1,125 @@
 const express = require("express");
-const fs = require("fs");
-
+const crypto = require("crypto");
 const app = express();
+
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-const DB_FILE = "db.json";
+// ===== 임시 DB (실전은 DB 연결 가능) =====
+let users = {};
+let keys = {};
 
-// --------------------
-// DB 로드 / 저장
-// --------------------
-function loadDB() {
-  if (!fs.existsSync(DB_FILE)) {
-    fs.writeFileSync(DB_FILE, JSON.stringify({ users: [], keys: [] }));
-  }
-  return JSON.parse(fs.readFileSync(DB_FILE));
-}
-
-function saveDB(data) {
-  fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
-}
-
-// --------------------
-// 서버 확인용
-// --------------------
+// =======================
+// 서버 상태
+// =======================
 app.get("/", (req, res) => {
-  res.send("🔥 MCR License Server Running");
+  res.json({ status: "MCR License Server Running 🔥" });
 });
 
-// --------------------
+// =======================
 // 회원가입
-// --------------------
+// =======================
 app.post("/signup", (req, res) => {
   const { id, pw } = req.body;
 
-  const db = loadDB();
+  if (!id || !pw)
+    return res.json({ success: false, msg: "입력 오류" });
 
-  if (db.users.find(u => u.id === id)) {
+  if (users[id])
     return res.json({ success: false, msg: "이미 존재" });
-  }
 
-  db.users.push({ id, pw, expire: 0 });
-  saveDB(db);
+  users[id] = {
+    pw,
+    expire: null,
+    pc: null
+  };
 
   res.json({ success: true });
 });
 
-// --------------------
+// =======================
 // 로그인
-// --------------------
+// =======================
 app.post("/login", (req, res) => {
   const { id, pw } = req.body;
 
-  const db = loadDB();
+  const user = users[id];
+  if (!user || user.pw !== pw)
+    return res.json({ success: false });
 
-  const user = db.users.find(u => u.id === id && u.pw === pw);
+  let remain = 0;
 
-  if (!user) return res.json({ success: false });
-
-  const now = Date.now();
-
-  if (user.expire > now) {
-    return res.json({
-      success: true,
-      valid: true,
-      remain: Math.floor((user.expire - now) / 86400000)
-    });
+  if (user.expire) {
+    const diff = user.expire - Date.now();
+    remain = Math.ceil(diff / 86400000);
+    if (remain < 0) remain = 0;
   }
 
-  res.json({ success: true, valid: false });
+  res.json({ success: true, remain_days: remain });
 });
 
-// --------------------
-// 코드 등록 (기간 연장)
-// --------------------
-app.post("/activate", (req, res) => {
-  const { id, code } = req.body;
+// =======================
+// 키 생성 (관리자)
+// =======================
+app.post("/generate_key", (req, res) => {
+  const { days = 30, count = 1 } = req.body;
 
-  const db = loadDB();
+  let list = [];
 
-  const key = db.keys.find(k => k.code === code && !k.used);
+  for (let i = 0; i < count; i++) {
+    const key =
+      "MCR-" +
+      crypto.randomBytes(4).toString("hex").toUpperCase();
 
-  if (!key) return res.json({ success: false });
+    keys[key] = {
+      days,
+      used: false
+    };
 
-  const user = db.users.find(u => u.id === id);
-  if (!user) return res.json({ success: false });
+    list.push(key);
+  }
 
-  const now = Date.now();
+  res.json({ success: true, keys: list });
+});
 
-  user.expire = Math.max(user.expire, now) + key.days * 86400000;
+// =======================
+// 키 사용 (고객)
+// =======================
+app.post("/use_key", (req, res) => {
+  const { id, key, pc } = req.body;
 
-  key.used = true;
+  const user = users[id];
+  const k = keys[key];
 
-  saveDB(db);
+  if (!user)
+    return res.json({ success: false, msg: "회원 없음" });
+
+  if (!k)
+    return res.json({ success: false, msg: "키 없음" });
+
+  if (k.used)
+    return res.json({ success: false, msg: "이미 사용됨" });
+
+  // PC 제한
+  if (user.pc && user.pc !== pc)
+    return res.json({ success: false, msg: "다른 PC 사용중" });
+
+  const expire = Date.now() + k.days * 86400000;
+
+  user.expire = expire;
+  user.pc = pc;
+
+  k.used = true;
 
   res.json({ success: true });
 });
 
-// --------------------
-// 관리자 키 생성
-// --------------------
-app.post("/admin/generate", (req, res) => {
-  const { days } = req.body;
-
-  const db = loadDB();
-
-  const code = "KEY-" + Math.random().toString(36).substr(2, 8).toUpperCase();
-
-  db.keys.push({
-    code,
-    days,
-    used: false
-  });
-
-  saveDB(db);
-
-  res.json({ code });
+// =======================
+// 키 목록 조회
+// =======================
+app.get("/keys", (req, res) => {
+  res.json(keys);
 });
 
 app.listen(PORT, () => {
