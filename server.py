@@ -1,118 +1,70 @@
-import os, json, time
-from fastapi import FastAPI, HTTPException, Header, Request
-from pydantic import BaseModel
-from passlib.context import CryptContext
-import jwt
+from fastapi import FastAPI
+from datetime import datetime, timedelta
 
 app = FastAPI()
-pwd = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
-SUPER_ID = os.environ.get("SUPERADMIN_ID", "dldydtjq159")
-SUPER_PW = os.environ.get("SUPERADMIN_PW", "tkfkd4026")
-SECRET = os.environ.get("TOKEN_SECRET", "change-me")
+# ====== 임시 DB ======
+users = {}
+keys = {}
 
-ADMINS_FILE = os.environ.get("ADMINS_FILE", "admins.json")
-DATA_FILE = os.environ.get("DATA_FILE", "data.json")
+# =====================
+# 서버 확인
+# =====================
+@app.get("/")
+def home():
+    return {"status": "MCR License Server Running"}
 
-def _load(path, default):
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return default
+# =====================
+# 회원가입
+# =====================
+@app.post("/signup")
+def signup(id: str, pw: str):
+    if id in users:
+        return {"success": False, "msg": "이미 가입됨"}
 
-def _save(path, obj):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
+    users[id] = {"pw": pw, "expire": None}
+    return {"success": True}
 
-admins = _load(ADMINS_FILE, {"superadmin":{"id":SUPER_ID,"pw_hash":pwd.hash(SUPER_PW)},"admins":[]})
-data = _load(DATA_FILE, {"stores":["김경영 요리 연구소","청년회관"],"byStore":{},"lastSync":""})
-_save(ADMINS_FILE, admins)
-_save(DATA_FILE, data)
+# =====================
+# 로그인
+# =====================
+@app.post("/login")
+def login(id: str, pw: str):
+    user = users.get(id)
+    if not user or user["pw"] != pw:
+        return {"success": False}
 
-class LoginReq(BaseModel):
-    id: str
-    pw: str
+    if user["expire"] and user["expire"] > datetime.now():
+        remain = (user["expire"] - datetime.now()).days
+        return {"success": True, "remain_days": remain}
 
-class AdminAddReq(BaseModel):
-    id: str
-    pw: str
-    name: str | None = None
+    return {"success": True, "remain_days": 0}
 
-@app.get("/storeapp/v1/version")
-def version():
-    return {"version":"6.0"}
+# =====================
+# 코드 등록
+# =====================
+@app.post("/use_key")
+def use_key(id: str, key: str):
 
-@app.post("/storeapp/v1/auth/login")
-def login(req: LoginReq):
-    if req.id == SUPER_ID and pwd.verify(req.pw, admins["superadmin"]["pw_hash"]):
-        token = jwt.encode({"sub":req.id,"super":True,"exp":int(time.time())+1800}, SECRET, algorithm="HS256")
-        return {"token":token, "is_super":True}
+    if key not in keys:
+        return {"success": False, "msg": "잘못된 코드"}
 
-    for a in admins["admins"]:
-        if a["id"] == req.id and pwd.verify(req.pw, a["pw_hash"]):
-            token = jwt.encode({"sub":req.id,"super":False,"exp":int(time.time())+1800}, SECRET, algorithm="HS256")
-            return {"token":token, "is_super":False}
+    days = keys[key]
+    expire = datetime.now() + timedelta(days=days)
 
-    raise HTTPException(status_code=401, detail="Invalid id or password")
+    users[id]["expire"] = expire
+    del keys[key]
 
-def _auth_super(request: Request):
-    auth = request.headers.get("authorization")
-    if not auth or not auth.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Missing Bearer token")
+    return {"success": True, "expire": expire}
 
-    tok = auth.split(" ",1)[1]
-    try:
-        dec = jwt.decode(tok, SECRET, algorithms=["HS256"])
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid token")
+# =====================
+# 관리자 키 생성
+# =====================
+@app.post("/generate_key")
+def generate_key(days: int):
 
-    if not dec.get("super"):
-        raise HTTPException(status_code=403, detail="Super admin only")
+    import random
+    key = "KEY-" + str(random.randint(100000,999999))
+    keys[key] = days
 
-    return dec
-
-@app.get("/storeapp/v1/auth/admins")
-def list_admins():
-    return {
-        "admins": [
-            {"id": SUPER_ID, "name": "슈퍼", "is_super": True}
-        ] + [
-            {"id": a["id"], "name": a.get("name",""), "is_super": False}
-            for a in admins["admins"]
-        ]
-    }
-
-@app.post("/storeapp/v1/auth/admins")
-def add_admin(req: AdminAddReq, request: Request):
-    dec = _auth_super(request)
-    if any(a["id"] == req.id for a in admins["admins"]):
-        raise HTTPException(status_code=400, detail="exists")
-
-    admins["admins"].append({
-        "id": req.id,
-        "pw_hash": pwd.hash(req.pw),
-        "name": req.name
-    })
-    _save(ADMINS_FILE, admins)
-    return {"ok": True}
-
-@app.get("/storeapp/v1/data")
-def get_all():
-    return data
-
-@app.post("/storeapp/v1/save")
-def save_all(body: dict):
-    global data
-    data = body.get("data", data)
-    _save(DATA_FILE, data)
-    return {"ok": True}
-
-@app.get("/storeapp/v1/store/{store}")
-def get_store(store: str):
-    return {"store_data": data.get("byStore",{}).get(store,{})}
-
-@app.post("/storeapp/v1/store/{store}")
-def save_store(store: str, body: dict):
-    data.setdefault("byStore",{})[store] = body.get("store_data",{})
-    _save(DATA_FILE, data)
-    return {"ok": True}
+    return {"key": key, "days": days}
