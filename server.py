@@ -1,70 +1,118 @@
-from fastapi import FastAPI
-from datetime import datetime, timedelta
+const express = require("express");
+const app = express();
 
-app = FastAPI()
+app.use(express.json());
 
-# ====== 임시 DB ======
-users = {}
-keys = {}
+const PORT = process.env.PORT || 3000;
 
-# =====================
-# 서버 확인
-# =====================
-@app.get("/")
-def home():
-    return {"status": "MCR License Server Running"}
+// ===== 임시 DB =====
+let users = {};
+let keys = {};
 
-# =====================
-# 회원가입
-# =====================
-@app.post("/signup")
-def signup(id: str, pw: str):
-    if id in users:
-        return {"success": False, "msg": "이미 가입됨"}
+// =====================
+// 서버 확인
+// =====================
+app.get("/", (req, res) => {
+  res.json({ status: "MCR License Server Running" });
+});
 
-    users[id] = {"pw": pw, "expire": None}
-    return {"success": True}
+// =====================
+// 회원가입
+// =====================
+app.post("/signup", (req, res) => {
+  const { id, pw } = req.body;
 
-# =====================
-# 로그인
-# =====================
-@app.post("/login")
-def login(id: str, pw: str):
-    user = users.get(id)
-    if not user or user["pw"] != pw:
-        return {"success": False}
+  if (users[id])
+    return res.json({ success: false, msg: "이미 존재" });
 
-    if user["expire"] and user["expire"] > datetime.now():
-        remain = (user["expire"] - datetime.now()).days
-        return {"success": True, "remain_days": remain}
+  users[id] = {
+    pw: pw,
+    expire: null,
+    pc: null
+  };
 
-    return {"success": True, "remain_days": 0}
+  res.json({ success: true });
+});
 
-# =====================
-# 코드 등록
-# =====================
-@app.post("/use_key")
-def use_key(id: str, key: str):
+// =====================
+// 로그인
+// =====================
+app.post("/login", (req, res) => {
+  const { id, pw } = req.body;
+  const user = users[id];
 
-    if key not in keys:
-        return {"success": False, "msg": "잘못된 코드"}
+  if (!user || user.pw !== pw)
+    return res.json({ success: false });
 
-    days = keys[key]
-    expire = datetime.now() + timedelta(days=days)
+  let remain = 0;
 
-    users[id]["expire"] = expire
-    del keys[key]
+  if (user.expire) {
+    const diff = user.expire - Date.now();
+    remain = Math.ceil(diff / (1000 * 60 * 60 * 24));
+    if (remain < 0) remain = 0;
+  }
 
-    return {"success": True, "expire": expire}
+  res.json({ success: true, remain_days: remain });
+});
 
-# =====================
-# 관리자 키 생성
-# =====================
-@app.post("/generate_key")
-def generate_key(days: int):
+// =====================
+// 키 생성 (관리자용)
+// =====================
+app.post("/generate_key", (req, res) => {
+  const { days = 30, count = 1 } = req.body;
 
-    import random
-    key = "KEY-" + str(random.randint(100000,999999))
-    keys[key] = days
+  let list = [];
 
-    return {"key": key, "days": days}
+  for (let i = 0; i < count; i++) {
+    const key = "KEY-" + Math.random().toString(36)
+      .substring(2, 10)
+      .toUpperCase();
+
+    keys[key] = {
+      days: days,
+      used: false
+    };
+
+    list.push(key);
+  }
+
+  res.json({ success: true, keys: list });
+});
+
+// =====================
+// 키 사용 (고객)
+// =====================
+app.post("/use_key", (req, res) => {
+  const { id, key, pc } = req.body;
+
+  const user = users[id];
+  const k = keys[key];
+
+  if (!user) return res.json({ success: false, msg: "회원 없음" });
+  if (!k) return res.json({ success: false, msg: "키 없음" });
+  if (k.used) return res.json({ success: false, msg: "이미 사용됨" });
+
+  // PC 제한
+  if (user.pc && user.pc !== pc)
+    return res.json({ success: false, msg: "다른 PC" });
+
+  const expire = Date.now() + k.days * 86400000;
+
+  user.expire = expire;
+  user.pc = pc;
+
+  k.used = true;
+
+  res.json({ success: true });
+});
+
+// =====================
+// 키 목록 조회 (관리자)
+// =====================
+app.get("/keys", (req, res) => {
+  res.json(keys);
+});
+
+app.listen(PORT, () => {
+  console.log("Server running on port " + PORT);
+});
