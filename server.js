@@ -1,116 +1,116 @@
 const express = require("express");
-const app = express();
+const fs = require("fs");
 
+const app = express();
 app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
+const DB_FILE = "keys.json";
 
-// ===== 메모리 DB =====
-let users = {};
-let keys = {};
+function loadDB(){
+  if(!fs.existsSync(DB_FILE)) return [];
+  return JSON.parse(fs.readFileSync(DB_FILE));
+}
+
+function saveDB(data){
+  fs.writeFileSync(DB_FILE, JSON.stringify(data,null,2));
+}
 
 // =====================
-// 서버 상태 확인
+// 🔥 관리자 로그인
 // =====================
-app.get("/", (req, res) => {
-  res.json({ status: "MCR License Server Running" });
+app.post("/api/login",(req,res)=>{
+  const {id,pw} = req.body;
+
+  if(id==="admin" && pw==="1234")
+    res.json({success:true});
+  else
+    res.json({success:false});
 });
 
 // =====================
-// 회원가입
+// 🔥 키 생성
 // =====================
-app.post("/signup", (req, res) => {
-  const { id, pw } = req.body;
+app.post("/api/generate",(req,res)=>{
+  const {days,count} = req.body;
+  const db = loadDB();
 
-  if (users[id])
-    return res.json({ success: false, msg: "이미 존재" });
+  for(let i=0;i<count;i++){
+    const key = Math.random().toString(36).substr(2,10).toUpperCase();
 
-  users[id] = {
-    pw: pw,
-    expire: 0,
-    pc: null
-  };
-
-  res.json({ success: true });
-});
-
-// =====================
-// 로그인
-// =====================
-app.post("/login", (req, res) => {
-  const { id, pw } = req.body;
-  const user = users[id];
-
-  if (!user || user.pw !== pw)
-    return res.json({ success: false });
-
-  let remain = 0;
-
-  if (user.expire > Date.now()) {
-    const diff = user.expire - Date.now();
-    remain = Math.ceil(diff / 86400000);
+    db.push({
+      key,
+      days,
+      used:false,
+      start:null,
+      expire:null,
+      pc:null
+    });
   }
 
-  res.json({ success: true, remain_days: remain });
+  saveDB(db);
+  res.json({ok:true});
 });
 
 // =====================
-// 키 생성 (관리자)
+// 🔥 키 목록
 // =====================
-app.post("/generate_key", (req, res) => {
-  const { days = 30, count = 1 } = req.body;
+app.get("/api/list",(req,res)=>{
+  res.json(loadDB());
+});
 
-  let list = [];
+// =====================
+// 🔥 키 삭제
+// =====================
+app.get("/api/delete",(req,res)=>{
+  const key=req.query.key;
+  const db=loadDB().filter(k=>k.key!==key);
+  saveDB(db);
+  res.json({ok:true});
+});
 
-  for (let i = 0; i < count; i++) {
-    const key = "MCR-" + Math.random().toString(36)
-      .substring(2, 10)
-      .toUpperCase();
+// =====================
+// 🔥 고객 로그인 / 인증
+// =====================
+app.post("/api/use",(req,res)=>{
 
-    keys[key] = {
-      days: days,
-      used: false
-    };
+  const {key, pc} = req.body;
+  const db = loadDB();
 
-    list.push(key);
+  const k = db.find(x=>x.key===key);
+
+  if(!k) return res.json({ok:false,msg:"키 없음"});
+
+  // 🔒 PC 고정
+  if(k.pc && k.pc !== pc)
+    return res.json({ok:false,msg:"다른 PC에서 사용중"});
+
+  const now = Date.now();
+
+  // ===== 최초 사용 =====
+  if(!k.used){
+
+    k.used = true;
+    k.start = now;
+    k.expire = now + k.days*86400000;
+    k.pc = pc;
+
+    saveDB(db);
+
+    return res.json({
+      ok:true,
+      remain:k.days
+    });
   }
 
-  res.json({ success: true, keys: list });
+  // ===== 이미 사용중 =====
+
+  if(now > k.expire)
+    return res.json({ok:false,msg:"기간 만료"});
+
+  const remain = Math.ceil((k.expire-now)/86400000);
+
+  res.json({ok:true,remain});
 });
 
 // =====================
-// 키 사용 (고객)
-// =====================
-app.post("/use_key", (req, res) => {
-  const { id, key, pc } = req.body;
-
-  const user = users[id];
-  const k = keys[key];
-
-  if (!user) return res.json({ success: false, msg: "회원 없음" });
-  if (!k) return res.json({ success: false, msg: "키 없음" });
-  if (k.used) return res.json({ success: false, msg: "이미 사용됨" });
-
-  if (user.pc && user.pc !== pc)
-    return res.json({ success: false, msg: "다른 PC" });
-
-  const expire = Date.now() + k.days * 86400000;
-
-  user.expire = expire;
-  user.pc = pc;
-
-  k.used = true;
-
-  res.json({ success: true });
-});
-
-// =====================
-// 키 목록 조회 (관리자)
-// =====================
-app.get("/keys", (req, res) => {
-  res.json(keys);
-});
-
-app.listen(PORT, () => {
-  console.log("Server running on port " + PORT);
-});
+app.listen(3000,()=>console.log("MCR Server Running"));
