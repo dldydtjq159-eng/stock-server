@@ -1,48 +1,124 @@
 const express = require("express");
-const app = express();
+const fs = require("fs");
 
+const app = express();
 app.use(express.json());
 
-let licenses = [];
+const PORT = process.env.PORT || 3000;
 
-function generateLicense(duration) {
-  const rand = Math.random().toString(36).substring(2, 10).toUpperCase();
-  return `PRO-${duration}-${rand}`;
+const DB_FILE = "db.json";
+
+// --------------------
+// DB 로드 / 저장
+// --------------------
+function loadDB() {
+  if (!fs.existsSync(DB_FILE)) {
+    fs.writeFileSync(DB_FILE, JSON.stringify({ users: [], keys: [] }));
+  }
+  return JSON.parse(fs.readFileSync(DB_FILE));
 }
 
-// ======================
-// 💰 코드 자동 생성 API
-// ======================
-app.post("/payment-success", (req, res) => {
+function saveDB(data) {
+  fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
+}
 
-  const duration = req.body.duration;
+// --------------------
+// 서버 확인용
+// --------------------
+app.get("/", (req, res) => {
+  res.send("🔥 MCR License Server Running");
+});
 
-  const code = generateLicense(duration);
+// --------------------
+// 회원가입
+// --------------------
+app.post("/signup", (req, res) => {
+  const { id, pw } = req.body;
 
-  licenses.push({
-    code: code,
-    duration: duration,
-    activated: false,
-    device: null,
-    expire: null
+  const db = loadDB();
+
+  if (db.users.find(u => u.id === id)) {
+    return res.json({ success: false, msg: "이미 존재" });
+  }
+
+  db.users.push({ id, pw, expire: 0 });
+  saveDB(db);
+
+  res.json({ success: true });
+});
+
+// --------------------
+// 로그인
+// --------------------
+app.post("/login", (req, res) => {
+  const { id, pw } = req.body;
+
+  const db = loadDB();
+
+  const user = db.users.find(u => u.id === id && u.pw === pw);
+
+  if (!user) return res.json({ success: false });
+
+  const now = Date.now();
+
+  if (user.expire > now) {
+    return res.json({
+      success: true,
+      valid: true,
+      remain: Math.floor((user.expire - now) / 86400000)
+    });
+  }
+
+  res.json({ success: true, valid: false });
+});
+
+// --------------------
+// 코드 등록 (기간 연장)
+// --------------------
+app.post("/activate", (req, res) => {
+  const { id, code } = req.body;
+
+  const db = loadDB();
+
+  const key = db.keys.find(k => k.code === code && !k.used);
+
+  if (!key) return res.json({ success: false });
+
+  const user = db.users.find(u => u.id === id);
+  if (!user) return res.json({ success: false });
+
+  const now = Date.now();
+
+  user.expire = Math.max(user.expire, now) + key.days * 86400000;
+
+  key.used = true;
+
+  saveDB(db);
+
+  res.json({ success: true });
+});
+
+// --------------------
+// 관리자 키 생성
+// --------------------
+app.post("/admin/generate", (req, res) => {
+  const { days } = req.body;
+
+  const db = loadDB();
+
+  const code = "KEY-" + Math.random().toString(36).substr(2, 8).toUpperCase();
+
+  db.keys.push({
+    code,
+    days,
+    used: false
   });
 
-  console.log("🆕 코드 생성:", code);
+  saveDB(db);
 
-  res.json({ code: code });
+  res.json({ code });
 });
 
-// 코드 목록 확인
-app.get("/licenses", (req, res) => {
-  res.json(licenses);
-});
-
-// 서버 확인용
-app.get("/", (req, res) => {
-  res.send("License Server Running 🚀");
-});
-
-const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log("License server running on port " + PORT);
+  console.log("Server running on port " + PORT);
 });
