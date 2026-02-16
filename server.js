@@ -1,36 +1,104 @@
 const express = require("express");
+const fs = require("fs");
 const app = express();
 
 app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
+const DB = "keys.json";
 
-// ===== 임시 DB =====
-let keys = {
-  "TEST-1234": { used:false }
-};
+// DB 로드
+function load(){
+  if(!fs.existsSync(DB)) return [];
+  return JSON.parse(fs.readFileSync(DB));
+}
 
-// 서버 확인
+// DB 저장
+function save(data){
+  fs.writeFileSync(DB, JSON.stringify(data,null,2));
+}
+
+// 랜덤 키 생성
+function genKey(){
+  return "MCR-" + Math.random().toString(36).substr(2,8).toUpperCase();
+}
+
+// 상태 확인
 app.get("/", (req,res)=>{
-  res.json({ status:"MCR License Server Running" });
+  res.json({status:"MCR License Server Running"});
 });
 
-// 키 검증
+
+// ==========================
+// 🔥 키 생성
+// ==========================
+app.post("/generate_key",(req,res)=>{
+  const {days=30,count=1} = req.body;
+
+  let db = load();
+  let out = [];
+
+  for(let i=0;i<count;i++){
+    const key = genKey();
+
+    db.push({
+      key,
+      days,
+      used:false,
+      expire:null
+    });
+
+    out.push(key);
+  }
+
+  save(db);
+  res.json({keys:out});
+});
+
+
+// ==========================
+// 🔥 키 목록
+// ==========================
+app.get("/keys",(req,res)=>{
+  res.json(load());
+});
+
+
+// ==========================
+// 🔥 키 검증 (프로그램용)
+// ==========================
 app.post("/verify",(req,res)=>{
+  const {key} = req.body;
+  let db = load();
 
-  const { key } = req.body;
+  const item = db.find(k=>k.key===key);
 
-  if(!keys[key])
-    return res.json({ success:false, msg:"키 없음" });
+  if(!item) return res.json({ok:false,msg:"키 없음"});
 
-  if(keys[key].used)
-    return res.json({ success:false, msg:"이미 사용됨" });
+  // 처음 사용 시 → 기간 시작
+  if(!item.used){
+    item.used = true;
+    item.expire = Date.now() + item.days*86400000;
+    save(db);
+  }
 
-  keys[key].used = true;
+  if(Date.now() > item.expire)
+    return res.json({ok:false,msg:"기간 만료"});
 
-  res.json({ success:true });
+  res.json({ok:true,expire:item.expire});
 });
 
-app.listen(PORT,()=>{
-  console.log("Server running on port "+PORT);
+
+// ==========================
+// 🔥 키 삭제
+// ==========================
+app.get("/delete",(req,res)=>{
+  const {key} = req.query;
+  let db = load().filter(k=>k.key!==key);
+  save(db);
+  res.json({ok:true});
+});
+
+
+app.listen(process.env.PORT || 3000, ()=>{
+  console.log("Server running");
 });
